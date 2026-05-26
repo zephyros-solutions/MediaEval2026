@@ -1,0 +1,442 @@
+"""
+Task 2: Enhanced Proposition Generation using Fine-tuned T5
+
+Fine-tunes a T5 model on implicit proposition data from the annotation CSV,
+then generates missing premises/conclusions for task1 predictions that need them.
+
+Usage (from project root):
+    python task2_generation/task2_generator_enhanced.py           # Use T5 (if trained)
+    python task2_generation/task2_generator_enhanced.py --t5     # Train T5 then generate
+    python task2_generation/task2_generator_enhanced.py --ollama # Use Ollama instead
+    python task2_generation/task2_generator_enhanced.py --both   # Train T5 + generate, no ollama
+"""
+
+import argparse
+import json
+import os
+import sys
+import warnings
+from pathlib import Path
+
+warnings.filterwarnings("ignore")
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+
+import pandas as pd
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, TensorDataset, RandomSampler
+from torch.optim import AdamW
+from tqdm import tqdm
+
+try:
+    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+
+try:
+    from core.ollama_integration import OllamaGenerator, OllamaClient
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = config.OUTPUT_DIR
+
+T5_MODEL = config.T5_MODEL_NAME
+T5_MODEL_DIR = os.path.join(OUTPUT_DIR, "task2_t5_model")
+T5_TRAIN_PAIRS_FILE = os.path.join(OUTPUT_DIR, "task2_t5_training_pairs.json")
+
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 1. DATA LOADING
+# ---------------------------------------------------------------------------
+
+def load_task1_predictions():
+    """Load task1 predictions from outputs."""
+    preds_path = os.path.join(OUTPUT_DIR, "predictions_classifiers_transformer.json")
+    if not os.path.exists(preds_path):
+        # Fall back to generic predictions file
+        preds_path = os.path.join(OUTPUT_DIR, "predictions_classifiers.json")
+    if not os.path.exists(preds_path):
+        print("ERROR: No task1 predictions found. Run a classifier first.")
+        sys.exit(1)
+    with open(preds_path) as f:
+        predictions = json.load(f)
+    return predictions
+
+
+def build_training_pairs(data):
+    """Build (source, target) training pairs from the CSV implicit texts.
+
+    Returns list of dicts: {'source': str, 'target': str, 'type': 'premise'|'conclusion'}
+    Uses the majority_label to determine which implicit text to use.
+    """
+    pairs = []
+    for i, row in data["df"].iterrows():
+        label = row["majority_label"]
+        if label not in ("premise", "conclusion"):
+            continue
+
+        # Use the first available implicit text from annotators
+        implicit_cols = [c for c in data["df"].columns if c.endswith("_implicit")]
+        implicit_text = None
+        for col in implicit_cols:
+            val = row.get(col)
+            if pd.notna(val) and str(val).strip():
+                implicit_text = str(val).strip()
+                break
+
+        if not implicit_text:
+            continue
+
+        task_type = "premise" if label == "premise" else "conclusion"
+        pairs.append({
+            "source": f"Generate implicit {task_type} for: {row['tweet_text']}",
+            "target": implicit_text,
+            "type": task_type,
+        })
+    return pairs
+
+
+# ---------------------------------------------------------------------------
+# 2. T5 FINE-TUNING
+# ---------------------------------------------------------------------------
+
+def tokenize_pair(pairs, tokenizer, max_len):
+    """Tokenize source-target pairs for T5."""
+    sources = [p["source"] for p in pairs]
+    targets = [p["target"] for p in pairs]
+
+    source_enc = tokenizer(
+        sources, max_length=max_len, padding="max_length", truncation=True,
+        return_tensors="pt",
+    )
+    target_enc = tokenizer(
+        targets, max_length=max_len, padding="max_length", truncation=True,
+        return_tensors="pt",
+    )
+    return source_enc, target_enc
+
+
+def train_t5(pairs, device):
+    """Fine-tune T5 on (source, target) pairs."""
+    max_len = config.T5_MAX_LENGTH
+    batch_size = config.T5_BATCH_SIZE
+    num_epochs = config.T5_NUM_EPOCHS
+    lr = config.T5_LEARNING_RATE
+
+    tokenizer = AutoTokenizer.from_pretrained(T5_MODEL)
+    model = AutoModelForSeq2SeqLM.from_pretrained(T5_MODEL).to(device)
+
+    # Split into train/val
+    from sklearn.model_selection import train_test_split as _train_test_split
+    train_pairs, val_pairs = _train_test_split(pairs, test_size=0.2, random_state=config.RANDOM_STATE)
+
+    print(f"  Train pairs: {len(train_pairs)}")
+    print(f"  Val pairs:   {len(val_pairs)}")
+
+    train_source, train_target = tokenize_pair(train_pairs, tokenizer, max_len)
+    train_dataset = TensorDataset(
+        train_source["input_ids"], train_source["attention_mask"],
+        train_target["input_ids"], train_target["attention_mask"],
+    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=RandomSampler(train_dataset))
+
+    val_source, val_target = tokenize_pair(val_pairs, tokenizer, max_len)
+    val_dataset = TensorDataset(
+        val_source["input_ids"], val_source["attention_mask"],
+        val_target["input_ids"], val_target["attention_mask"],
+    )
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+
+    optimizer = AdamW(model.parameters(), lr=lr)
+
+    print(f"\n  Fine-tuning {T5_MODEL} for {num_epochs} epochs on {device.type}...\n")
+    best_loss = float("inf")
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
+            input_ids = batch[0].to(device)
+            attention_mask = batch[1].to(device)
+            labels = batch[2].to(device)
+
+            optimizer.zero_grad()
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+        avg_train = total_loss / len(train_loader)
+
+        # Validation
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                input_ids = batch[0].to(device)
+                attention_mask = batch[1].to(device)
+                labels = batch[2].to(device)
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                val_loss += outputs.loss.item()
+        avg_val = val_loss / len(val_loader)
+
+        print(f"    train_loss={avg_train:.4f}  val_loss={avg_val:.4f}")
+
+        if avg_val < best_loss:
+            best_loss = avg_val
+            # Save best model
+            os.makedirs(T5_MODEL_DIR, exist_ok=True)
+            model.save_pretrained(T5_MODEL_DIR)
+            tokenizer.save_pretrained(T5_MODEL_DIR)
+            print(f"    -> Best model saved")
+
+    return model, tokenizer
+
+
+# ---------------------------------------------------------------------------
+# 3. GENERATION
+# ---------------------------------------------------------------------------
+
+def generate_with_t5(model, tokenizer, texts, predictions, device):
+    """Generate propositions using T5."""
+    results = []
+    pred_labels = {p["hard_prediction"]: p["label"] for p in predictions}
+    pred_probs = {p["hard_prediction"]: p.get("probabilities", {}) for p in predictions}
+
+    for pred in tqdm(predictions, desc="T5 Generation"):
+        pid = pred["id"]
+        tweet = pred["text"]
+        label = pred_labels.get(pred["hard_prediction"], "none")
+
+        if label == "none":
+            results.append({
+                "id": pid,
+                "tweet": tweet,
+                "predicted_label": label,
+                "confidence": float(max(pred_probs.get(pid, {}).values())) if pred_probs.get(pid) else 0.0,
+                "generated_proposition": None,
+            })
+            continue
+
+        task_type = "premise" if label == "premise" else "conclusion"
+        prompt = f"Generate implicit {task_type} for: {tweet}"
+
+        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids,
+                max_length=config.T5_GENERATION_MAX_LENGTH,
+                num_beams=config.T5_NUM_BEAMS,
+                early_stopping=True,
+                temperature=config.T5_TEMPERATURE,
+                top_p=config.T5_TOP_P,
+            )
+        generated = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        results.append({
+            "id": pid,
+            "tweet": tweet,
+            "predicted_label": label,
+            "confidence": float(max(pred_probs.get(pid, {}).values())) if pred_probs.get(pid) else 0.0,
+            "generated_proposition": generated,
+        })
+
+    return results
+
+
+def generate_with_ollama(predictions):
+    """Generate propositions using Ollama (Mistral)."""
+    if not OLLAMA_AVAILABLE:
+        print("  Ollama integration not available (core.ollama_integration missing)")
+        return []
+
+    client = OllamaClient()
+    if not client.check_connection():
+        print("  WARNING: Ollama not running. Skipping Ollama generation.")
+        return []
+
+    generator = OllamaGenerator(model="mistral", client=client)
+    tweets = [p["text"] for p in predictions]
+    labels = [p["label"] for p in predictions]
+    results = generator.generate_batch(tweets, labels, show_progress=True)
+
+    # Add confidence from classifier probabilities
+    for r, p in zip(results, predictions):
+        probs = p.get("probabilities", {})
+        r["confidence"] = float(max(probs.values())) if probs else 0.0
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 4. EVALUATION (lexical overlap baseline against annotator implicit texts)
+# ---------------------------------------------------------------------------
+
+def evaluate_generation(generated, data):
+    """Evaluate generated propositions against annotator implicit texts."""
+    # Build id -> annotator implicit texts
+    id_to_ann = {}
+    for i, imp_texts in enumerate(data["implicit_texts"]):
+        if imp_texts:
+            id_to_ann[data["ids"][i]] = imp_texts
+
+    candidates = [g for g in generated if g.get("generated_proposition")]
+    if not candidates:
+        print("\n  No propositions generated — cannot evaluate.")
+        return {}
+
+    prec_scores, rec_scores, f1_scores = [], [], []
+    for g in candidates:
+        gen = g["generated_proposition"].lower().split()
+        refs = id_to_ann.get(g["id"])
+        if not refs:
+            continue
+        for ref_text in refs:
+            ref = ref_text.lower().split()
+            if not ref:
+                continue
+            common = len(set(gen) & set(ref))
+            p = common / max(len(gen), 1)
+            r = common / max(len(ref), 1)
+            f = 2 * p * r / max(p + r, 1e-10)
+            prec_scores.append(p)
+            rec_scores.append(r)
+            f1_scores.append(f)
+
+    return {
+        "precision": float(np.mean(prec_scores)) if prec_scores else 0,
+        "recall": float(np.mean(rec_scores)) if rec_scores else 0,
+        "f1_lexical": float(np.mean(f1_scores)) if f1_scores else 0,
+        "evaluated": len(candidates),
+    }
+
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="T5-enhanced proposition generation for Task 2")
+    parser.add_argument("--t5", action="store_true", help="Train T5 model first")
+    parser.add_argument("--ollama", action="store_true", help="Use Ollama for generation")
+    parser.add_argument("--both", action="store_true", help="Train T5 + generate (no Ollama)")
+    args, _ = parser.parse_known_args()
+
+    print("=" * 80)
+    print("TASK 2: ENHANCED PROPOSITION GENERATION")
+    print("=" * 80)
+
+    # Device
+    device, device_name = config.get_device()
+    print(f"\nDevice: {device_name}")
+
+    # Load task1 predictions
+    print("\nLoading task1 predictions...")
+    predictions = load_task1_predictions()
+    print(f"  Loaded {len(predictions)} predictions")
+
+    # Load CSV data for training pairs and evaluation
+    print("Loading annotation data...")
+    data = config.load_data()
+
+    # ---- Train T5 if requested ----
+    model = None
+    tokenizer = None
+    if args.t5 or args.both:
+        if not TRANSFORMERS_AVAILABLE:
+            print("ERROR: transformers package required for T5. Install with: pip install transformers")
+            sys.exit(1)
+
+        # Load or build training pairs
+        if os.path.exists(T5_TRAIN_PAIRS_FILE):
+            with open(T5_TRAIN_PAIRS_FILE) as f:
+                pairs = json.load(f)
+            print(f"\nLoaded {len(pairs)} training pairs from cache")
+        else:
+            pairs = build_training_pairs(data)
+            with open(T5_TRAIN_PAIRS_FILE, "w") as f:
+                json.dump(pairs, f)
+            print(f"\nBuilt and cached {len(pairs)} training pairs")
+
+        premise_count = sum(1 for p in pairs if p["type"] == "premise")
+        conclusion_count = sum(1 for p in pairs if p["type"] == "conclusion")
+        print(f"  Premise: {premise_count}, Conclusion: {conclusion_count}")
+
+        # Check if pre-trained model exists
+        if os.path.exists(T5_MODEL_DIR) and os.path.isdir(T5_MODEL_DIR):
+            print(f"\nLoading pre-trained T5 from {T5_MODEL_DIR}...")
+            model = AutoModelForSeq2SeqLM.from_pretrained(T5_MODEL_DIR).to(device)
+            tokenizer = AutoTokenizer.from_pretrained(T5_MODEL_DIR)
+            print("  Model loaded.")
+        else:
+            model, tokenizer = train_t5(pairs, device)
+
+    # ---- Generate ----
+    print("\n" + "=" * 80)
+    print("GENERATING PROPOSITIONS")
+    print("=" * 80)
+
+    generated = []
+
+    if args.ollama and not (args.t5 or args.both):
+        # Ollama-only mode
+        generated = generate_with_ollama(predictions)
+    elif model is not None and tokenizer is not None:
+        generated = generate_with_t5(model, tokenizer, None, predictions, device)
+    else:
+        print("No model available for generation. Use --t5 or --ollama.")
+        sys.exit(1)
+
+    generated = [g for g in generated if g.get("generated_proposition")]
+
+    # ---- Evaluate ----
+    eval_report = evaluate_generation(generated, data)
+
+    # ---- Save ----
+    all_results = []
+    for pred in predictions:
+        pid = pred["id"]
+        gen_entry = next((g for g in generated if g["id"] == pid), None)
+        if gen_entry:
+            all_results.append(gen_entry)
+        else:
+            all_results.append({
+                "id": pid,
+                "tweet": pred["text"],
+                "predicted_label": pred["label"],
+                "confidence": float(max(pred.get("probabilities", {}).values())) if pred.get("probabilities") else 0.0,
+                "generated_proposition": None,
+            })
+
+    output_path = os.path.join(OUTPUT_DIR, "task2_generated_propositions_enhanced.json")
+    with open(output_path, "w") as f:
+        json.dump(all_results, f, indent=2)
+    print(f"\nPropositions saved to {output_path}")
+
+    # ---- Summary ----
+    premise_count = sum(1 for g in all_results if g["predicted_label"] == "premise")
+    conclusion_count = sum(1 for g in all_results if g["predicted_label"] == "conclusion")
+    none_count = sum(1 for g in all_results if g["predicted_label"] == "none")
+    gen_count = sum(1 for g in all_results if g.get("generated_proposition"))
+
+    print(f"\n{'=' * 80}")
+    print("SUMMARY")
+    print(f"{'=' * 80}")
+    print(f"  Generated propositions: {gen_count}/{len(all_results)}")
+    print(f"  Premise: {premise_count}, Conclusion: {conclusion_count}")
+    print(f"  Evaluation: prec={eval_report.get('precision', 0):.4f}, "
+          f"rec={eval_report.get('recall', 0):.4f}, f1={eval_report.get('f1_lexical', 0):.4f}")
+    print(f"{'=' * 80}")
+
+
+if __name__ == "__main__":
+    main()
