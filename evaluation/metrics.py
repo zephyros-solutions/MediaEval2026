@@ -42,8 +42,10 @@ def compute_metrics(y_true, y_pred, prob_vectors, ann_labels=None, method_name="
 
     # Cross-entropy against soft labels
     if ann_labels is not None:
+        ann_keys = sorted(ann_labels[0].keys())
+        prob_keys = sorted(prob_vectors[0].keys())
         ce_values = [
-            -sum(ann_labels[i].get(j, 0) * np.log(max(prob_vectors[i].get(j, 0), EPS)) for j in range(3))
+            -sum(ann_labels[i].get(ak, 0) * np.log(max(prob_vectors[i].get(pk, EPS), EPS)) for ak, pk in zip(ann_keys, prob_keys))
             for i in range(len(y_true))
         ]
         ce = float(np.mean(ce_values))

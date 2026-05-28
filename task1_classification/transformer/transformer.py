@@ -186,6 +186,19 @@ def run_transformer(device_arg=None, save_model=False):
         device_arg: Force device ("cpu", "cuda", "mps") or None for auto-detect.
         save_model: If True, save classifier.pkl and config.json to output dir.
     """
+    pred_list, report, _ = _run_transformer_pipeline(device_arg=device_arg, save_model=save_model)
+    return pred_list, report
+
+
+def _run_transformer_pipeline(device_arg=None, save_model=False):
+    """Core transformer pipeline used by both run_transformer and ensemble interface.
+
+    Returns (predictions, report, artifacts).
+    artifacts = {"clf": classifier, "X_all_norm": ndarray, "y_all": ndarray,
+                 "best_name": str, "device": device, "device_name": str,
+                 "X_all": ndarray, "model": DistilBERT, "tokenizer": Tokenizer,
+                 "df": DataFrame}
+    """
     if device_arg:
         device = torch.device(device_arg)
         device_name = f"{device_arg.upper()} (forced)"
@@ -213,11 +226,11 @@ def run_transformer(device_arg=None, save_model=False):
     print("5-FOLD STRATIFIED CROSS-VALIDATION")
     print("=" * 80)
     X_all_norm = normalize(X_all, norm='l2')
-    mean_f1, std_f1, cv_f1_scores, best_name = run_cv(X_all_norm, y_all, df["text"])
+    mean_f1, std_f1, cv_f1_scores, best_name, _, _ = run_cv(X_all_norm, y_all, df["text"])
 
-    # Train final model on full training set using CV-best classifier
+    # Train final model on 80% train split using CV-best classifier
     print("\n" + "=" * 80)
-    print("PHASE 2: Final model on full data")
+    print("PHASE 2: Final model on training data")
     print("=" * 80)
 
     split_idx = int(len(df) * TRAIN_VAL_SPLIT)
@@ -243,7 +256,7 @@ def run_transformer(device_arg=None, save_model=False):
     pred_list = []
     for i in range(len(df)):
         pred_id = int(predictions[i])
-        prob_dict = {label: float(all_probs[i][k]) for k, label in enumerate(config.ID_TO_LABEL)}
+        prob_dict = {ID_TO_LABEL[k]: float(all_probs[i][k]) for k in range(3)}
         pred_list.append({
             "id": int(df.iloc[i]["id"]),
             "text": df.iloc[i]["text"],
@@ -302,7 +315,95 @@ def run_transformer(device_arg=None, save_model=False):
             }, f, indent=2)
         print(f"Classifier saved to {tconfig.TRANSFORMER_OUTPUT_DIR}")
 
-    return pred_list, report
+    # Return model artifacts for ensemble reuse
+    artifacts = {
+        "clf": best_clf,
+        "X_all_norm": X_all_norm,
+        "y_all": y_all,
+        "df": df,
+        "X_train": X_train,
+        "y_train": y_train,
+        "best_name": best_name,
+        "device": device,
+        "device_name": device_name,
+        "X_all": X_all,
+        "model": model,
+        "tokenizer": tokenizer,
+    }
+
+    return pred_list, report, artifacts
+
+
+def run_transformer_for_ensemble():
+    """Run DistilBERT CV + train on ALL data. Returns (predictions, report, artifacts).
+
+    The ensemble uses this to get the EXACT model selected by CV, trained on all data.
+    """
+    print("\n" + "=" * 80)
+    print("ENSEMBLE MODE: Training on ALL data using CV-selected classifier")
+    print("=" * 80)
+
+    # Reuse the full pipeline but pass use_full_data=True
+    # We do this by calling _run_transformer_pipeline with a flag
+    # Actually, we need the same model extracted on ALL data. Let's just
+    # call _run_transformer_pipeline (which already does that) and use
+    # its clf on the full dataset.
+    # The clf was trained on 80%, so we need to refit it on 100% with the same params.
+    pred_list, report, artifacts = _run_transformer_pipeline()
+
+    # The classifier was trained on the 80% split. For the ensemble, we need
+    # it trained on all data. Extract the best classifier type and retrain.
+    clf = _build_classifier(artifacts["best_name"])
+    clf.fit(artifacts["X_all_norm"], artifacts["y_all"])
+
+    # Replace with retrained model
+    artifacts["clf"] = clf
+
+    # Predict on all data (already done above, but with the retrained clf)
+    predictions = clf.predict(artifacts["X_all_norm"])
+    all_probs = clf.predict_proba(artifacts["X_all_norm"])
+
+    pred_list = []
+    df = artifacts["df"]
+    for i in range(len(df)):
+        pred_id = int(predictions[i])
+        prob_dict = {ID_TO_LABEL[k]: float(all_probs[i][k]) for k in range(3)}
+        pred_list.append({
+            "id": int(df.iloc[i]["id"]),
+            "text": df.iloc[i]["text"],
+            "label": ID_TO_LABEL[pred_id],
+            "probabilities": prob_dict,
+            "hard_prediction": pred_id,
+        })
+
+    pred_dist = Counter(p["label"] for p in pred_list)
+    all_probs_dicts = [{CLASS_LABELS[j]: float(all_probs[i][j]) for j in range(3)} for i in range(len(df))]
+    all_soft = [dict(row["soft_label"]) for _, row in df.iterrows()]
+    metrics, per_class = compute_metrics(
+        y_true=artifacts["y_all"], y_pred=predictions,
+        prob_vectors=all_probs_dicts, ann_labels=all_soft, method_name="distilbert_features",
+    )
+
+    # Override report with full-data metrics
+    report["test_metrics"]["f1_macro_3class"] = metrics["f1_macro_3class"]
+    report["test_metrics"]["f1_macro_2class"] = metrics["f1_macro_2class"]
+    report["test_metrics"]["cross_entropy"] = metrics["cross_entropy"]
+    report["per_class"] = per_class
+    report["prediction_distribution"] = {k: int(v) for k, v in pred_dist.items()}
+
+    artifacts["clf"] = clf  # retrained on all data
+    return pred_list, report, artifacts
+
+
+def get_full_data_predictions():
+    """Train DistilBERT + CV-selected classifier on ALL data.
+
+    Returns predictions in challenge submission format (no report).
+    Uses the exact classifier selected by 5-fold CV.
+    """
+    preds, _, _ = run_transformer_for_ensemble()
+    return preds
+
 
 # -- Main --
 
@@ -339,7 +440,6 @@ def main():
     print(f"Final CE: {report['test_metrics']['cross_entropy']:.4f}")
     print(f"Prediction dist: {report['prediction_distribution']}")
     print(f"{'=' * 80}")
-
 
 
 if __name__ == "__main__":

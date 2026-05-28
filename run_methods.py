@@ -49,6 +49,21 @@ def _run_transformer():
     return run_transformer()
 
 
+def _run_svm():
+    from task1_classification.new_classifiers import run_svm
+    return run_svm()
+
+
+def _run_xgboost():
+    from task1_classification.new_classifiers import run_xgboost
+    return run_xgboost()
+
+
+def _run_sbert():
+    from task1_classification.new_classifiers import run_sbert
+    return run_sbert()
+
+
 # ======== TASK 2 GENERATORS ========
 
 def _build_examples(df, per_class=3):
@@ -267,10 +282,13 @@ def _evaluate_task2(predictions, data):
 # ======== TASK 1 METHODS ========
 # Method name -> (display, run_fn)
 TASK1_METHODS = {
-    "tfidf": ("TF-IDF", _run_tfidf),
+    "tfidf": ("TF-IDF + RF", _run_tfidf),
     "ollama_zero": ("Ollama Zero-Shot", _run_ollama_zero),
     "ollama_fewshot": ("Ollama Few-Shot", _run_ollama_fewshot),
     "transformer": ("Transformer (DistilBERT)", _run_transformer),
+    "svm": ("TF-IDF + LinearSVC", _run_svm),
+    "xgboost": ("TF-IDF + XGBoost", _run_xgboost),
+    "sbert": ("SBERT + LR", _run_sbert),
 }
 
 # ======== TASK 2 METHODS ========

@@ -12,6 +12,7 @@ import pandas as pd
 # ============== DATA PATHS ============
 
 DATA_CSV_PATH = "/Users/SB/LocalProjects/DataSets/Medieeval/2026/enthymemes_2/merged_annotations_v2.csv"
+TEST_CSV_PATH = "/Users/SB/LocalProjects/DataSets/Medieeval/2026/enthymemes_2/test_v2.csv"
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
 
 

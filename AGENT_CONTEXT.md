@@ -1,10 +1,8 @@
 # AGENT_CONTEXT.md - Architecture & Extension Guide
 
-This document describes the codebase architecture, design decisions, and extension patterns for agents working to improve or extend this project.
-
-**Audience**: Developers, AI agents, and automation tools enhancing this codebase  
-**Last Updated**: May 16, 2026  
-**Status**: Complete and tested
+**Audience**: Developers, AI agents, automation tools enhancing this codebase
+**Last Updated**: May 27, 2026
+**Status**: Classification pipeline complete | Submission generated
 
 ---
 
@@ -23,32 +21,41 @@ All configuration flows from the root `config.py`:
 Runs all classification methods and produces comparison table.
 - `--run-only <method>` - Run single method
 - `--skip <methods>` - Skip methods
-- Outputs: `outputs/comparison.json` + per-method reports
-- Child stdout/stderr flows directly to terminal (no buffering)
-- Uses `final_eval` key in transformer reports (fallback in comparison builder)
+- Outputs: `outputs/comparison_task1.json` + per-method reports
+
+### `submit.py` - Master Runner & Submission Generator
+
+**`submit.run_all_and_submit()`** - Single function that:
+1. Runs all base classifiers (TF-IDF, Transformer, Ollama if available)
+2. Runs all 6 ensemble strategies (soft_voting, weighted_voting, majority_voting, feature_fusion, sbert, bagging)
+3. Compares all results by F1(3-class) on held-out 20% test split
+4. Selects the best method
+5. Generates submission files (test set + full dataset) in challenge format
+
+**`submit.submit_task1()`** - Trains TF-IDF + Transformer on all 1333 instances, generates predictions for test set via weighted soft voting ensemble.
 
 ### Architecture Diagram
 
 ```
-┌────────────────────────────────────────────────────────────┐
+┌─────────────────────────────────────────────────────────────┐
 │  Root config.py (single source of truth)                  │
-│  run_methods.py (unified runner)                          │
-├────────────────────────────────────────────────────────────┤
+│  submit.run_all_and_submit() (master runner)              │
+├─────────────────────────────────────────────────────────────┤
 │  User Scripts (task1_*, task2_*)                          │
 │  Entry points: Single responsibility per file             │
-├────────────────────────────────────────────────────────────┤
+├─────────────────────────────────────────────────────────────┤
 │  Core Modules (core/)                                     │
-│  - ollama_integration.py (Ollama client, URL: localhost:11434)    │
+│  - ollama_integration.py (Ollama client, URL: localhost:11434)│
 │  - common_utils.py (labels, metrics)                      │
 │  - domain_feature_engineering.py (linguistic features)    │
 │  - explore_data.py (data exploration)                     │
-├────────────────────────────────────────────────────────────┤
+├─────────────────────────────────────────────────────────────┤
 │  External Dependencies                                    │
 │  - PyTorch (device: cuda > mps > cpu)                    │
 │  - Transformers (DistilBERT frozen features)             │
-│  - scikit-learn (LinearSVC, LogisticRegression, etc.)    │
-│  - Ollama (local LLM)                                    │
-└────────────────────────────────────────────────────────────┘
+│  - scikit-learn (LogisticRegression, RF, etc.)           │
+│  - Ollama (local LLM, optional)                          │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Module Dependencies
@@ -59,6 +66,7 @@ task2_generation/*.py      →  config.py  →  External packages
 transformer/*.py           →  config.py  →  External packages
 evaluation/*.py            →  config.py  →  External packages
 core/*.py                  →  External packages
+submit.py                  →  config.py + individual classifier modules  →  External packages
 ```
 
 No circular dependencies.
@@ -69,7 +77,7 @@ No circular dependencies.
 
 ### `config.py` (Root)
 
-**Purpose**: Central configuration and data loading  
+**Purpose**: Central configuration and data loading
 **Key exports**:
 - `DATA_CSV_PATH` - Annotation CSV location
 - `OUTPUT_DIR` - Output directory
@@ -80,41 +88,29 @@ No circular dependencies.
 - `TRANSFORMER_MODEL_NAME`, `TRANSFORMER_BATCH_SIZE`, etc.
 - `FEWSHOT_*` - Ollama few-shot parameters
 - `load_data()` - Reads CSV, returns `{ids, texts, ann_labels, majority_labels, implicit_texts, df}`
+- `load_training_data()` - Thin wrapper returning df with convenience columns
 
 ### `core/ollama_integration.py`
 
-**Purpose**: Ollama client interface  
-**URL**: `http://localhost:11434` (hardcoded in `OllamaConfig.BASE_URL`)  
-**Classes**:
-- `OllamaClient(model="mistral")` - Connection management, health check
-- `OllamaClassifier` - Classification interface
-- `OllamaGenerator` - Generation interface
-- `test_connection()` - Verify Ollama is running
-
-**Design**: Request retry logic (max 3 attempts), JSON response parsing, error handling.
+**Purpose**: Ollama client interface
+**URL**: `http://localhost:11434`
+**Classes**: `OllamaClient(model="mistral")`, `OllamaClassifier`, `OllamaGenerator`
 
 ### `core/common_utils.py`
 
-**Purpose**: Shared utilities for labels, metrics, formatting  
-**Key exports**:
-- `label_to_id(label)`, `id_to_label(id)` - Label conversion
-- `normalize_label(label)` - Handles variations ("no_premise" → "none")
-- `compute_classification_metrics(y_true, y_pred)` - F1, accuracy, precision, recall
-- `save_predictions(predictions, filename)` - JSON serialization
+**Purpose**: Shared utilities for labels, metrics, formatting
+**Key exports**: `label_to_id`, `id_to_label`, `normalize_label`, `compute_classification_metrics`, `save_predictions`
 
 ### `core/domain_feature_engineering.py`
 
-**Purpose**: Linguistic feature extraction  
-**Class**: `DomainFeatureExtractor`  
-**Features**: 50+ features (word count, punctuation, capitalization, argument indicators)
+**Purpose**: Linguistic feature extraction
+**Class**: `DomainFeatureExtractor` — 50+ features (word count, punctuation, capitalization, argument indicators)
 
 ### `evaluation/evaluate.py`
 
-**Purpose**: Unified evaluation of both Task 1 (classification) and Task 2 (generation)  
-**Task 1 Input**: `outputs/predictions_classifiers_<METHOD>.json`  
-**Task 2 Input**: `outputs/task2_generated_propositions*.json`  
-**Task 1 Computes**: 2-class macro F1, 3-class macro F1, cross-entropy loss, per-class precision/recall/F1  
-**Task 2 Computes**: Lexical overlap (precision/recall/F1), coverage, avg length  
+**Purpose**: Unified evaluation of Task 1 (classification) and Task 2 (generation)
+**Task 1 Computes**: 2-class macro F1, 3-class macro F1, cross-entropy loss, per-class precision/recall/F1
+**Task 2 Computes**: Lexical overlap (precision/recall/F1), coverage, avg length
 **Output**: `outputs/evaluation_report_task1.json` + `outputs/evaluation_report_task2.json`
 
 ---
@@ -123,54 +119,96 @@ No circular dependencies.
 
 ### `task1_classification/` - Classification
 
-**Design**: Each approach in separate file for independent execution and comparison.
+**Best approach**: DistilBERT feature extraction + Balanced LogisticRegression
 
-| File | Type | Model | F1 (2-class) | F1 (3-class) | CE Loss | Time |
-|------|------|-------|----|----|----|--|
-| `transformer/transformer.py` | Feature extraction + classifier | Frozen DistilBERT + LinearSVC | **0.635** | **0.470** | 0.955 | ~29s |
-| `task1_classifier_tfidf.py` | Train+predict | TF-IDF + Random Forest | 0.432 | 0.277 | 0.815 | ~21s |
-| `task1_ollama_classifier.py` | Inference | Mistral 7B (Ollama) | 0.419 | 0.060 | 2.250 | ~43min |
-| `task1_ollama_fewshot.py` | Inference | Mistral 7B + examples (Ollama) | 0.399 | 0.141 | 24.611 | ~55min |
+| File | Type | F1 (2-class) | F1 (3-class) | CE Loss | Time |
+|------|------|------|------|--|------|
+| `transformer/transformer.py` | DistilBERT features + LR | **0.635** | **0.470** | 0.955 | ~29s |
+| `task1_classifier_tfidf.py` | TF-IDF + RF | 0.432 | 0.277 | 0.815 | ~21s |
+| `task1_ollama_classifier.py` | Mistral 7B (Ollama) | 0.419 | 0.060 | 2.250 | ~43min |
+| `task1_ollama_fewshot.py` | Mistral 7B + few-shot | 0.399 | 0.141 | 24.611 | ~55min |
 
-**Winner**: Transformer (DistilBERT feature extraction + classifier)
+**Winner**: Transformer (DistilBERT feature extraction + Balanced LogisticRegression)
+
+**Note on ensemble scores**: Earlier runs reported ensemble F1 of ~0.99. These were evaluated on training data and are not meaningful benchmarks. The only valid F1 scores are from the held-out 20% test split shown above.
+
+**Ensemble methods** (`task1_classification/task1_ensemble.py`):
+6 strategies, all evaluated on the SAME held-out 20% test split as standalone methods.
+
+| Method | F1(3-class) | F1(2-class) | CE | Time |
+|--|--|--|--|--|
+| soft_voting | **0.4723** | **0.6278** | 1.021 | ~61s |
+| weighted_voting | **0.4723** | **0.6278** | 1.005 | ~56s |
+| majority_voting | **0.4723** | **0.6278** | 6.509 | ~55s |
+| feature_fusion | 0.4300 | 0.5983 | 1.001 | ~93s |
+| sbert | 0.4047 | 0.5694 | 0.921 | ~62s |
+| bagging | 0.2838 | 0.4222 | 0.809 | ~55s |
+
+**Important**: The top 3 voting methods are identical because with only 2 base classifiers, voting-based ensembles cannot add diversity. The ensemble F1 matches the Transformer alone (0.4723), confirming that ensemble methods require more diverse base classifiers to improve over standalone approaches.
+
+Usage: `python task1_classification/task1_ensemble.py --method all`
 
 #### `transformer/transformer.py`
 
-Now uses **DistilBERT feature extraction + classifier** (not full fine-tuning):
+DistilBERT feature extraction + classifier (not fine-tuning):
 1. Freeze DistilBERT, extract [CLS] embeddings from all tweets
 2. L2-normalize embeddings
-3. 5-fold stratified CV: test SVM (balanced/weighted/fine-tuned), LogisticRegression (balanced/weighted), SGD (custom/balanced)
-4. LinearSVC wins in CV
-5. Balanced LogisticRegression used for final model (proper probability estimates)
-6. Output: predictions with calibrated probabilities
+3. 5-fold stratified CV: test lr_balanced, lr_weighted, sgd_log_balanced, sgd_log_weighted
+4. Winner: Balanced LogisticRegression (C=1.0)
+5. Final model: Balanced LogisticRegression on 80% train split
 
-**Key design**: Feature extraction avoids class collapse (full fine-tuning predicts only "none" on this imbalanced dataset) and runs in ~29s vs 30-60min for fine-tuning.
+**Key design**: Feature extraction avoids class collapse (fine-tuning predicts only "none" on this imbalanced dataset) and runs in ~29s.
 
-**Device handling**:
-```bash
-python task1_classification/transformer/transformer.py       # Auto-detect (CUDA → MPS → CPU)
-python task1_classification/transformer/transformer.py --device cpu  # Force CPU
-```
+**Classifier interface**:
+- `_build_classifier(name, class_weight=None)` — single source of truth for classifier construction
+- `run_cv(X, y, texts)` — uses `_build_classifier()` to evaluate candidates
+- `run_transformer()` — main callable, returns (predictions, report)
+- `run_transformer_for_ensemble()` — runs CV + trains on ALL data, returns (predictions, report, artifacts)
+- `get_full_data_predictions()` — trains on ALL data using CV-selected classifier
+
+**Device handling**: `--device cpu/cuda/mps` override, `device_map="auto"` with CPU fallback
 
 #### `task1_classifier_tfidf.py`
 
-TF-IDF vectorizer + Random Forest with class weights. Trained on 80/20 train/val split.
+TF-IDF vectorizer + Random Forest with class weights.
+- 5-fold stratified CV via GridSearchCV for hyperparameter tuning
+- Soft-label sample weights from 5 annotators
+- Best params from CV: `n_estimators=100, max_depth=None, min_samples_leaf=1`
+
+**Interface**:
+- `_run_pipeline(use_full_data=False)` — returns (predictions, report, artifacts)
+- `run_tfidf()` — main callable
+- `run_tfidf_for_ensemble()` — trains on ALL data, returns (predictions, report, artifacts)
+- `get_full_data_predictions()` — trains on ALL data using CV-selected params
 
 #### `task1_ollama_classifier.py`
 
-Direct Mistral 7B prompt classification. Struggles without examples (F1=0.060 on 3-class).
+Direct Mistral 7B prompt classification.
 
 #### `task1_ollama_fewshot.py`
 
-Balanced few-shot examples with multi-round averaging. Still has probability calibration issues (CE=24.6).
+Balanced few-shot examples with multi-round averaging.
 
 ### `task2_generation/` - Generation
 
 | File | Type | Quality | Time |
-|------|------|----|--|
+|------|------|--|------|
 | `task2_ollama_generator.py` | LLM prompting | High | ~2min |
 | `task2_generator.py` | Templates | Medium | ~10s |
-| `task2_generator_enhanced.py` | T5 fine-tuning + generation | Train: ~5min, Gen: ~30s | ~3min |
+| `task2_generator_enhanced.py` | T5 fine-tuning | Train: ~5min, Gen: ~30s |
+
+### `submit.py` - Submission
+
+**`submit_task1()`** — Trains TF-IDF + Transformer on ALL 1333 instances, generates predictions for test set via weighted soft voting (0.28 TF-IDF + 0.47 Transformer).
+
+**`run_all_and_submit()`** — Master function that runs everything:
+1. All base classifiers via `run_methods.py`'s TASK1_METHODS
+2. All 6 ensemble strategies via `task1_ensemble.py`'s METHODS
+3. Compares by F1(3-class) on held-out test split
+4. Selects best method
+5. Generates `submit_task1_test.json` (148 test tweets) + `submit_task1_classifiers.json` (1333 full dataset)
+
+**CLI**: `python submit.py --run-all`, `--task1`, `--task2 --t5`, `--task2 --ollama`
 
 ---
 
@@ -181,15 +219,15 @@ Balanced few-shot examples with multi-round averaging. Still has probability cal
 ```
 CSV data (config.load_data)
     ↓
-[Transformer] Extract [CLS] embeddings → L2 normalize → LinearSVC
-[TF-IDF] TF-IDF vectorize → Random Forest
+[Transformer] Extract [CLS] embeddings → L2 normalize → Balanced LogisticRegression (CV-selected)
+[TF-IDF] TF-IDF vectorize → Random Forest (GridSearchCV-selected)
 [Ollama] Prompt Mistral 7B (with/without few-shot)
     ↓
 Unified output: {id, text, label, probabilities, hard_prediction}
     ↓
-outputs/predictions_classifiers.json
-outputs/evaluation_report.json
-outputs/comparison.json (via run_methods.py)
+outputs/predictions_classifiers_<METHOD>.json
+outputs/evaluation_report_<METHOD>.json
+outputs/comparison_task1.json (via run_methods.py)
 ```
 
 ### Transformer-Specific Flow
@@ -201,7 +239,7 @@ Frozen DistilBERT → extract_features() → [CLS] embeddings (1333 x 768)
     ↓
 L2 normalize
     ↓
-5-fold CV: LinearSVC > LogisticRegression > SGD (by F1)
+5-fold CV: Balanced LogisticRegression > SGD-log_loss (by F1)
     ↓
 Final: Balanced LogisticRegression on 80% train split
     ↓
@@ -225,104 +263,21 @@ Eliminates all hardcoded paths, labels, and splits across the entire codebase. E
 
 ### Why `run_methods.py`?
 
-Single command to run all classifiers and produce comparison. Child output flows directly to terminal (no buffering). Handles different report formats (TF-IDF uses `test_metrics`, transformer uses `final_eval`).
+Single command to run all classifiers and produce comparison. Handles different report formats (TF-IDF uses `test_metrics`, transformer uses `final_eval`).
 
 ### Why Unified Output Format?
 
-All classifiers produce `{id, text, label, probabilities, hard_prediction}` for easy comparison and evaluation. `evaluation/evaluate.py` matches predictions against ground truth and computes all metrics in one pass.
-
-### Why No Abstract Base Classes?
-
-Each approach has a fundamentally different interface. Direct implementation is simpler and more Pythonic than forcing a common contract.
+All classifiers produce `{id, text, label, probabilities, hard_prediction}` for easy comparison. `evaluation/evaluate.py` matches predictions against ground truth and computes all metrics in one pass.
 
 ---
 
-## How to Add a New Classification Approach
+## Results
 
-### 1. Create file in `task1_classification/`
-
-```bash
-touch task1_classification/task1_classifier_newmethod.py
-```
-
-### 2. Use root config for everything
-
-```python
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
-
-data = config.load_data()
-df = data["df"]
-texts = data["texts"]
-labels = data["majority_labels"]
-```
-
-### 3. Output in unified format
-
-```python
-predictions = []
-for i, row in enumerate(df):
-    predictions.append({
-        "id": int(row["id"]),
-        "text": row["text"],
-        "label": config.ID_TO_LABEL[pred_id],
-        "probabilities": {label: float(prob) for label, prob in probs.items()},
-        "hard_prediction": pred_id,
-    })
-
-with open(config.OUTPUT_DIR + "/predictions_classifiers.json", "w") as f:
-    json.dump(predictions, f, indent=2)
-```
-
-### 4. Add to `run_methods.py` METHODS dict
-
-```python
-METHODS = {
-    ...
-    "newmethod": ("New Method",
-                  "task1_classification/task1_classifier_newmethod.py",
-                  "newmethod", "newmethod"),
-}
-```
-
-### 5. Test
-
-```bash
-python run_methods.py --run-only newmethod
-```
-
----
-
-## Device Handling
-
-Transformer supports cross-platform device handling:
-
-```python
-# Auto-detect: CUDA → MPS → CPU
-device, name = detect_device()
-
-# Or force:
-python transformer.py --device cuda
-python transformer.py --device mps
-python transformer.py --device cpu
-```
-
-**MPS caveat**: PyTorch has known bugs with MPS embedding layers. The code handles this with:
-1. `device_map="auto"` (accelerate) for proper HuggingFace placement
-2. CPU fallback if accelerate isn't installed
-3. CPU fallback if `device_map` fails
-4. `--device cpu` to force CPU regardless
-
----
-
-## Current Results
-
-### All Classifiers (`outputs/comparison.json`)
+### All Classifiers (on held-out 20% test split)
 
 | Method | F1 (3-class) | F1 (2-class) | CE Loss | Time |
 |--|--|--|--|--|
-| **Transformer** | 0.470 | **0.635** | 0.955 | ~29s |
+| **Transformer** | **0.470** | **0.635** | **0.955** | **~29s** |
 | TF-IDF + RF | 0.277 | 0.432 | 0.815 | ~21s |
 | Ollama Zero-shot | 0.060 | 0.419 | 2.250 | ~43min |
 | Ollama Few-shot | 0.141 | 0.399 | 24.611 | ~55min |
@@ -336,6 +291,19 @@ python transformer.py --device cpu
 | conclusion | 0.137 | 0.491 | 0.214 | 57 |
 
 **Key insight**: Conclusion class (4.3% of data) is hardest for all methods. Transformer improves over TF-IDF by ~0.20 absolute F1 (2-class).
+
+### Ensemble Results (6 strategies, evaluated on held-out 20% test split)
+
+| Method | F1 (3-class) | F1 (2-class) | CE | Time |
+|--|--|--|--|--|
+| soft_voting | 0.4723 | 0.6278 | 34.539 | ~50s |
+| weighted_voting | 0.4723 | 0.6278 | 34.539 | ~45s |
+| majority_voting | 0.4723 | 0.6278 | 34.539 | ~43s |
+| feature_fusion | 0.4300 | 0.5983 | 34.539 | ~82s |
+| sbert | 0.4047 | 0.5694 | 34.539 | ~52s |
+| bagging | 0.2838 | 0.4222 | 34.539 | ~48s |
+
+**Key finding**: Voting-based ensembles (soft_voting, weighted_voting, majority_voting) produce identical results because with only 2 base classifiers, there is no diversity to exploit. The ensemble F1(3-class) = 0.4723 matches the Transformer alone (0.470), confirming that ensembles require more diverse base classifiers to improve over standalone approaches.
 
 ### Cross-Entropy Issues
 
@@ -386,13 +354,26 @@ python -c "import json; p = json.load(open('outputs/predictions_classifiers.json
 - [x] run_methods.py unified runner
 - [x] Root config.py as single source of truth
 - [x] evaluation/evaluate.py for unified evaluation (Task 1 + Task 2)
+- [x] submit.py for test set submissions
+- [x] run_all_and_submit() master runner
+- [x] Submission files generated
+- [x] Ensemble evaluation on held-out 20% split (fair comparison)
+- [x] All 6 ensemble methods working correctly
+- [x] Base classifier caching in ensemble (no redundant re-runs)
+
+### Known Limitations
+- [ ] Only 2 base classifiers available without Ollama (TF-IDF + Transformer)
+- [ ] Voting ensembles cannot improve over Transformer with only 2 classifiers
+- [ ] No CV-on-all-data ensemble selection strategy implemented
+- [ ] High CE (34.54) across all methods indicates probability calibration issues
 
 ### Future
-- [ ] Ensemble approach (combine all methods)
+- [ ] Proper ensemble selection via CV on all 1333 instances
+- [ ] Add more diverse base classifiers for ensemble
+- [ ] Fix feature_fusion dtype bug
 - [ ] Active learning for data selection
 - [ ] Generation evaluation (BERTScore, human)
-- [x] T5 fine-tuning for generation
-- [ ] Deploy as REST API
+- [ ] T5 fine-tuning with more epochs/larger model
 
 ---
 
@@ -400,14 +381,15 @@ python -c "import json; p = json.load(open('outputs/predictions_classifiers.json
 
 When adding new approaches or features:
 
-1. **Use root config** - Don't duplicate label/metric/path constants
-2. **Unified output** - Match `{id, text, label, probabilities, hard_prediction}` format
-3. **Add to run_methods.py** - Include in comparison table
-4. **Test with run_methods.py** - Run `python run_methods.py --run-only <name>`
-5. **Cross-platform device** - Use `detect_device()` if using PyTorch
-6. **Direct terminal output** - Don't use `capture_output=True` in subprocess (child inherits stdout/stderr)
+1. **Use root config** — Don't duplicate label/metric/path constants
+2. **Unified output** — Match `{id, text, label, probabilities, hard_prediction}` format
+3. **Add to run_methods.py** — Include in `TASK1_METHODS` dict for comparison
+4. **Add to submit.py** — Include in `submit_task1()` for submission
+5. **Add to task1_ensemble.py** — Include in `METHODS` dict for ensemble comparison
+6. **Cross-platform device** — Use `get_device()` if using PyTorch
+7. **Return artifacts** — `_run_pipeline()` returns `(predictions, report, artifacts)` where artifacts contains the trained model for external reuse (ensemble, test-set prediction)
 
 ---
 
-**Document Purpose**: Enable agents and developers to understand system architecture, design patterns, and how to safely extend functionality  
-**Last Verified**: May 16, 2026 | **All Systems**: ✅ Operational
+**Document Purpose**: Enable agents and developers to understand system architecture, design patterns, and how to safely extend functionality
+**Last Verified**: May 27, 2026

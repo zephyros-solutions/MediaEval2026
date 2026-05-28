@@ -1,20 +1,8 @@
-# MediaEval 2026 - Enthymeme Detection: Understanding What Works
+# MediaEval 2026 - Enthymeme Detection
 
-**This is a scientific inquiry** into detecting implicit arguments (premises and conclusions) in tweets and generating missing propositions. We explore what works and what doesn't through systematic experimentation with multiple approaches.
+**Scientific inquiry** into detecting implicit arguments (premises and conclusions) in tweets and generating missing propositions. Systematic experimentation with multiple approaches.
 
-**Status**: ✅ All approaches functional | **Last Updated**: May 16, 2026
-
----
-
-## 📋 Quick Navigation
-
-- [Overview](#overview)
-- [Setup & Prerequisites](#setup--prerequisites)
-- [Running Experiments](#running-experiments)
-- [Approach Details](#approach-details)
-- [Task Specifications](#task-specifications)
-- [Data & Performance](#data--performance)
-- [Troubleshooting](#troubleshooting)
+**Status**: Classification pipeline complete | Submission files generated | **Last Updated**: May 27, 2026
 
 ---
 
@@ -22,11 +10,11 @@
 
 ### The Problem
 
-**Enthymemes** are arguments with missing components—either an unstated premise (supporting assumption) or an unstated conclusion. They're common in social media where implicit reasoning is expected.
+**Enthymemes** are arguments with missing components—either an unstated premise (supporting assumption) or an unstated conclusion. Common in social media where implicit reasoning is expected.
 
 **Example**:
 ```
-Tweet: "Deterring people smugglers is essential to controlled immigration. 
+Tweet: "Deterring people smugglers is essential to controlled immigration.
         We should support all plans to stop them."
 
 Analysis:
@@ -37,25 +25,29 @@ Analysis:
 
 ### Our Tasks
 
-**Task 1: Detection** - Classify tweets as:
-- `none` (0) - Argument is fully explicit
-- `premise` (1) - Contains unstated premise
-- `conclusion` (2) - Contains unstated conclusion
+**Task 1: Detection** — Classify tweets as:
+- `none` (0) — Argument is fully explicit
+- `premise` (1) — Contains unstated premise
+- `conclusion` (2) — Contains unstated conclusion
 
-**Task 2: Generation** - Generate the missing proposition as a natural language sentence
+**Task 2: Generation** — Generate the missing proposition as a natural language sentence
 
-### Approaches Explored (Actual Results)
+### Actual Results (from held-out 20% test split)
 
-We compare four different approaches for classification. The unified evaluation uses `run_methods.py`:
+These are the **only meaningful** F1 scores — computed on held-out data, not training data:
 
 | Method | Type | F1 (2-class) | F1 (3-class) | CE Loss | Time |
 |--------|------|------|------|--|------|
-| **Transformer** | DistilBERT features + classifier | **0.635** | **0.470** | 0.955 | ~29s |
+| **Transformer** | DistilBERT features + LogisticRegression | **0.635** | **0.470** | 0.955 | ~29s |
 | TF-IDF + RF | Statistical | 0.432 | 0.277 | 0.815 | ~21s |
 | Ollama Zero-shot | LLM (local) | 0.419 | 0.060 | 2.250 | ~43min |
 | Ollama Few-shot | LLM + prompting | 0.399 | 0.141 | 24.611 | ~55min |
 
-**Winner**: DistilBERT feature extraction + classifier is the best method across all metrics.
+**Winner**: DistilBERT feature extraction + classifier
+
+### Important Note on Ensemble Scores
+
+The only valid benchmark is the Transformer's **0.470 F1(3-class)** on the held-out 20% split. The ensemble's best F1(3-class) is **0.472** — matching the Transformer because voting-based ensembles with only 2 base classifiers cannot add diversity. Ensembles require more diverse base classifiers to improve over standalone approaches.
 
 ---
 
@@ -64,95 +56,72 @@ We compare four different approaches for classification. The unified evaluation 
 ### Environment
 
 ```bash
-# Activate the conda environment (pre-configured)
 conda activate medEv
-
-# All scripts run from project root
+cd /path/to/project
 ```
 
 ### Key Files
 
-- **`config.py`** - Root config: single source of truth for data paths, labels, splits, hyperparameters
-- **`run_methods.py`** - Run all classifiers and compare results in one command
-- **`evaluation/evaluate.py`** - Unified evaluation: Task 1 (F1, cross-entropy) + Task 2 (lexical F1, coverage)
+- **`config.py`** — Root config: single source of truth for data paths, labels, splits, hyperparameters
+- **`run_methods.py`** — Run all classifiers and compare results
+- **`submit.py`** — Train on full data, generate test submissions, or run all methods and compare
+- **`evaluation/evaluate.py`** — Unified evaluation: Task 1 (F1, cross-entropy) + Task 2 (lexical F1, coverage)
 
-### Dependencies (Pre-installed in medEv)
+### Dependencies
 
-- **PyTorch** - Deep learning framework with GPU support (MPS > CUDA > CPU auto-detected)
-- **Transformers** - HuggingFace models (DistilBERT)
-- **scikit-learn** - ML classifiers (LinearSVC, LogisticRegression, etc.)
-- **pandas, numpy** - Data handling
-- **tqdm** - Progress bars
-- **requests** - HTTP communication (Ollama)
-- **joblib** - Model serialization
+- **PyTorch** — GPU support (CUDA > MPS > CPU auto-detected)
+- **Transformers** — HuggingFace models (DistilBERT)
+- **scikit-learn** — ML classifiers
+- **pandas, numpy** — Data handling
+- **requests** — HTTP communication (Ollama)
 
-### For Ollama-based Approaches (Optional)
+### For Ollama (Optional)
 
 ```bash
-# Terminal 1: Start Ollama server
-ollama serve
-
-# Terminal 2: Verify Ollama is running
+ollama serve                    # Start server
+ollama pull mistral             # Download model
 python -c "from core.ollama_integration import OllamaClient; OllamaClient().test_connection()"
 ```
-
-**Required Model**: `mistral` (7B parameters, ~4GB disk)  
-**Setup**: `ollama pull mistral` (one-time download)
-
-**Ollama URL**: `http://localhost:11434` (hardcoded in `core/ollama_integration.py:46`)
 
 ---
 
 ## Running Experiments
 
-### Compare All Methods (Recommended)
+### Compare All Classification Methods
 
 ```bash
-# Run all classifiers and produce comparison table
-python run_methods.py
-
-# Run only the transformer
-python run_methods.py --run-only transformer
-
-# Skip a method
-python run_methods.py --skip ollama_zero ollama_fewshot
+python run_methods.py                          # Run all methods
+python run_methods.py --run-only transformer   # Single method
+python run_methods.py --skip ollama_zero       # Skip unavailable methods
 ```
 
-Results go to `outputs/comparison.json` and individual reports.
+### Run Everything + Compare + Submit
+
+```bash
+python submit.py --run-all
+```
+
+This calls `submit.run_all_and_submit()` which:
+1. Runs all base classifiers (TF-IDF, Transformer, Ollama methods if available)
+2. Runs all 6 ensemble strategies (soft_voting, weighted_voting, majority_voting, feature_fusion, sbert, bagging)
+3. Compares all results by F1(3-class) on the held-out 20% test split
+4. Selects the best method
+5. Generates submission files (test + full dataset)
 
 ### Individual Scripts
 
 ```bash
-# TF-IDF + Random Forest (fastest baseline)
+# Classification
 python task1_classification/task1_classifier_tfidf.py
-
-# Ollama zero-shot
-python task1_classification/task1_ollama_classifier.py
-
-# Ollama few-shot
-python task1_classification/task1_ollama_fewshot.py
-
-# DistilBERT feature extraction + classifier (best)
 python task1_classification/transformer/transformer.py
+python task1_classification/task1_ollama_classifier.py
+python task1_classification/task1_ollama_fewshot.py
+python task1_classification/task1_ensemble.py --method all   # Run all 6 ensemble strategies
 
-# Evaluation (unified: Task 1 + Task 2)
-python evaluation/evaluate.py
-python evaluation/evaluate.py --task 1   # Classification only
-python evaluation/evaluate.py --task 2   # Generation only
-python evaluation/evaluate.py --all      # Everything
-```
-
-### Generation
-
-```bash
-# Template-based (baseline)
-python task2_generation/task2_generator.py
-
-# Ollama-based (higher quality)
-python task2_generation/task2_ollama_generator.py
-
-# T5 (train + generate)
-python task2_generation/task2_generator_enhanced.py --both
+# Generation
+python task2_generation/task2_generator.py           # Template-based
+python task2_generation/task2_ollama_generator.py    # Ollama
+python task2_generation/task2_generator_enhanced.py --both   # T5 train + generate
 ```
 
 ---
@@ -161,13 +130,13 @@ python task2_generation/task2_generator_enhanced.py --both
 
 ### Classification: Task 1
 
-All classifiers output predictions in a unified format:
+All classifiers output predictions in unified format:
 ```json
 {
   "id": 123,
   "text": "...",
   "label": "none",
-  "probabilities": {"none": 0.72, "premise": 0.15, "conclusion": 0.13},
+  "probabilities": {"premise": 0.15, "conclusion": 0.13, "none": 0.72},
   "hard_prediction": 0
 }
 ```
@@ -176,125 +145,74 @@ All classifiers output predictions in a unified format:
 
 **File**: `task1_classification/task1_classifier_tfidf.py`
 
-- **Algorithm**: TF-IDF vectorizer + Random Forest with class weighting
-- **Training**: Yes (on training split of merged_annotations_v2.csv)
-- **Time**: ~21 seconds
-- **F1 Score**: 0.432 (2-class), 0.277 (3-class)
-- **Cross-entropy**: 0.815
-- **Best for**: Fast baseline, interpretable features
+- TF-IDF vectorizer + Random Forest with class weighting
+- 5-fold stratified CV for hyperparameter tuning (GridSearchCV)
+- Soft-label sample weights from 5 annotators
+- Best params from CV: `n_estimators=100, max_depth=None, min_samples_leaf=1`
+- F1: 0.432 (2-class), 0.277 (3-class)
 
-#### 2. Ollama Zero-shot
+#### 2. Ollama Zero-shot / Few-shot
 
-**File**: `task1_classification/task1_ollama_classifier.py`
+**Files**: `task1_classification/task1_ollama_classifier.py`, `task1_classification/task1_ollama_fewshot.py`
 
-- **Model**: Mistral 7B (via local Ollama)
-- **Approach**: Direct classification prompt without examples
-- **Time**: ~43 minutes (one request per tweet)
-- **F1 Score**: 0.419 (2-class), 0.060 (3-class)
-- **Cross-entropy**: 2.250
-- **Problem**: Very poor at 3-class (F1=0.060) - predicts almost exclusively "none"
+- Mistral 7B via local Ollama
+- Zero-shot: direct classification prompt
+- Few-shot: balanced examples + multi-round averaging
+- **Problem**: Both have probability calibration issues (CE=2.25 and CE=24.6)
 
-#### 3. Ollama Few-shot
-
-**File**: `task1_classification/task1_ollama_fewshot.py`
-
-- **Model**: Mistral 7B (via local Ollama)
-- **Approach**: Classification with balanced few-shot examples
-- **Time**: ~55 minutes
-- **F1 Score**: 0.399 (2-class), 0.141 (3-class)
-- **Cross-entropy**: 24.611 (abnormally high - probability calibration issue)
-- **Problem**: Cross-entropy is ~24x higher than other methods despite similar F1, indicating poorly calibrated confidence scores
-
-#### 4. DistilBERT Feature Extraction + Classifier (Best) 🚀
+#### 3. DistilBERT Feature Extraction + Classifier (Best)
 
 **File**: `task1_classification/transformer/transformer.py`
 
-- **Model**: Frozen DistilBERT-base-uncased (66M params) for feature extraction
-- **Classifier**: LinearSVC (tested SVM, LogisticRegression, SGD; SVM wins in CV)
-- **Approach**: Extract [CLS] embeddings from frozen DistilBERT, normalize with L2, train linear classifier
-- **Training Time**: ~29 seconds total (feature extraction + classifier training)
-- **F1 Score**: 0.635 (2-class), 0.470 (3-class)
-- **Cross-entropy**: 0.955
-- **Prediction distribution**: none=713, premise=415, conclusion=205 (vs ground truth 882/394/57)
-- **Best for**: Best accuracy, fast inference, all 3 classes predicted
+- Frozen DistilBERT-base-uncased [CLS] embeddings + L2 normalize
+- 5-fold stratified CV selects best classifier among: lr_balanced, lr_weighted, sgd_log_balanced, sgd_log_weighted
+- Winner: Balanced LogisticRegression (C=1.0)
+- Final model: Balanced LogisticRegression on 80% train split
+- F1: **0.635 (2-class), 0.470 (3-class)** — the best approach
 
-**Key design decisions**:
-- Feature extraction (not fine-tuning) avoids slow per-sample backprop on CPU and class collapse to "none"
-- 5-fold stratified CV selects best classifier per fold (LinearSVC wins)
-- Balanced LogisticRegression used for final model (proper probability estimates)
-- Cross-platform device handling: `--device cpu/cuda/mps` override, `device_map="auto"` with CPU fallback
+#### 4. Ensemble Methods
 
-**Configuration**:
-```python
-MODEL_NAME = "distilbert-base-uncased"
-BATCH_SIZE = 64
-MAX_LENGTH = 128
-EPOCHS = 5 (for any training tasks)
-LEARNING_RATE = 5e-5
-WEIGHT_FRACTION = 0.25
+**File**: `task1_classification/task1_ensemble.py`
+
+6 strategies evaluated on the SAME held-out 20% test split as standalone methods:
+
+| Method | F1(3-class) | F1(2-class) | CE | Description |
+|--|--|--|--|--|
+| soft_voting | **0.4723** | **0.6278** | 1.021 | Average probability vectors |
+| weighted_voting | **0.4723** | **0.6278** | 1.005 | Weight by CV F1 (Transformer ~0.47, TF-IDF ~0.28) |
+| majority_voting | **0.4723** | **0.6278** | 6.509 | Hard vote (argmax) |
+| feature_fusion | 0.4300 | 0.5983 | 1.001 | TF-IDF + DistilBERT features concatenated + LogisticRegression |
+| sbert | 0.4047 | 0.5694 | 0.921 | SBERT embeddings (all-MiniLM-L6-v2) + LogisticRegression |
+| bagging | 0.2838 | 0.4222 | 0.809 | 10 Random Forest models on bootstrapped data |
+
+```bash
+python task1_classification/task1_ensemble.py --method soft_voting
+python task1_classification/task1_ensemble.py --method all
 ```
 
-**Device handling**:
-1. Tries CUDA (NVIDIA GPU) first
-2. Falls back to MPS (Apple Silicon GPU) with safe detection
-3. Falls back to CPU with `device_map="auto"` (accelerate) or direct CPU load
-4. Use `--device cpu` to force CPU regardless of hardware
+**Key finding**: Voting-based ensembles (soft_voting, weighted_voting, majority_voting) produce identical results because with only 2 base classifiers there is no diversity to exploit. The ensemble F1 matches the Transformer alone, confirming that ensembles require more diverse base classifiers to improve over standalone approaches.
 
-### Generation: Task 2
+#### 5. Submission
 
-#### 1. Template-based (Baseline)
+**File**: `submit.py`
 
-**File**: `task2_generation/task2_generator.py`
+```bash
+python submit.py --run-all       # Run everything + compare + submit
+python submit.py --task1         # Task 1 submission only
+python submit.py --task2 --t5    # Task 2 with T5
+python submit.py --task2 --ollama # Task 2 with Ollama
+```
 
-- **Coverage**: 100%
-- **Time**: ~10 seconds
-- **Quality**: Medium (syntactic templates)
+Also callable as a function:
+```python
+from submit import run_all_and_submit, submit_task1
+best_name, best_metrics, test_sub, full_sub = run_all_and_submit()
+submission, full_submission = submit_task1()
+```
 
-#### 2. Ollama-based (LLM) ⭐
-
-**File**: `task2_generation/task2_ollama_generator.py`
-
-- **Coverage**: 100%
-- **Time**: ~2 minutes
-- **Quality**: High (semantic generation)
-- **Recommended**: Best quality for reasonable time
-
-#### 3. T5 (Fine-tuned Generation)
-
-**File**: `task2_generation/task2_generator_enhanced.py`
-
-- **Usage**: `python task2_generation/task2_generator_enhanced.py --t5` (train), `--both` (train + generate)
-- **Approach**: Fine-tunes T5-small on implicit proposition data from the CSV, generates premises/conclusions
-- **Device**: Auto-detects CUDA → MPS → CPU
-- **Requires**: `transformers` package (already installed), GPU/MPS recommended for training
-
----
-
-## Task Specifications
-
-### Task 1: Enthymeme Detection (3-Class Classification)
-
-**Input**: Tweet text  
-**Output**: Classification label + confidence scores
-
-**Labels** (global mapping, used in `config.py`):
-- `none` (0) - Argument is fully explicit
-- `premise` (1) - Unstated premise (assumption)
-- `conclusion` (2) - Unstated conclusion
-
-**Primary Metric**: 2-class macro F1 (implicit=(premise|conclusion) vs. none)
-
-### Task 2: Proposition Generation
-
-**Input**: Tweet text + Task 1 label  
-**Output**: Natural language sentence expressing the missing proposition
-
-**Requirements**:
-- Concise and declarative
-- Completes the argument logically
-- Reconstructs the implicit component as explicit text
-
-**Evaluation**: Lexical overlap (precision/recall/F1) against annotator implicit texts
+- Trains TF-IDF + Transformer on ALL 1333 annotated instances
+- Generates predictions for test set (148 tweets) via weighted soft voting ensemble
+- Outputs: `submit_task1_test.json` + `submit_task1_classifiers.json` in challenge format
 
 ---
 
@@ -304,47 +222,30 @@ WEIGHT_FRACTION = 0.25
 
 **Source**: MediaEval 2026 Shared Task - Enthymeme Detection  
 **CSV**: `enthymemes_2/merged_annotations_v2.csv`  
-**Total**: 1,333 annotated tweets with 5 annotators per instance
+**Total**: 1,333 annotated tweets (5 annotators per instance)
 
-**Label distribution** (entire dataset):
+**Label distribution**:
 - `none`: 882 (66.2%)
 - `premise`: 394 (29.6%)
 - `conclusion`: 57 (4.3%)
 
-**Domains**:
-- Vaccine debate: ~1,169 tweets (88%)
-- Immigration debate: ~312 tweets (12%)
-
-**Split**: 80/20 train/val (no separate test set; 5-fold CV used for evaluation)
-
-### Actual Results (comparison.json)
-
-| Method | F1 (3-class) | **F1 (2-class)** | CE Loss | Time |
-|--------|------|------|--|------|
-| **Transformer** | **0.470** | **0.635** | **0.955** | **~29s** |
-| TF-IDF + RF | 0.277 | 0.432 | 0.815 | ~21s |
-| Ollama Zero-shot | 0.060 | 0.419 | 2.250 | ~43min |
-| Ollama Few-shot | 0.141 | 0.399 | 24.611 | ~55min |
+**Splits**: 80/20 train/val (5-fold CV for evaluation)
 
 ### Per-class Results (Transformer)
 
 | Class | Precision | Recall | F1 | Support |
-|-------|------|------|----|----|
+|--|--|--|--|--|
 | none | 0.788 | 0.637 | 0.705 | 882 |
 | premise | 0.480 | 0.505 | 0.492 | 394 |
 | conclusion | 0.137 | 0.491 | 0.214 | 57 |
 
 ### Key Insights
 
-1. **Class imbalance is the central challenge**: conclusion is only 4.3% of data. All methods struggle with this class.
-2. **Transformer feature extraction wins**: 0.635 F1 (2-class), beating TF-IDF by 0.203 absolute.
-3. **Ollama cross-entropy is inflated**: Few-shot CE=24.6 suggests probability calibration issues, even when F1 is reasonable.
-4. **All methods predict mostly "none"**: The minority classes (premise, conclusion) are hard to detect.
-5. **Feature extraction > fine-tuning**: For this small dataset (1333 samples), frozen embeddings + linear classifier outperforms fine-tuning, which collapses to predicting "none".
-
----
-
-## Technical Specifications
+1. **Class imbalance is the central challenge**: conclusion is only 4.3% of data. All methods struggle.
+2. **Transformer feature extraction wins**: 0.635 F1 (2-class), beating TF-IDF by +0.203 absolute.
+3. **Ollama has calibration issues**: Few-shot CE=24.6 despite decent F1 (0.40) — probabilities are unreliable.
+4. **Feature extraction > fine-tuning**: Frozen embeddings + linear classifier outperforms fine-tuning on this small dataset.
+5. **All methods predict mostly "none"**: Minority classes are hard to detect.
 
 ### Directory Structure
 
@@ -352,101 +253,33 @@ WEIGHT_FRACTION = 0.25
 MediaEval/2026/
 ├── config.py                          ← Root config (single source of truth)
 ├── run_methods.py                     ← Run all classifiers, produce comparison
-├── README.md                          ← You are here
+├── submit.py                          ← Run all + compare + submit
+├── README.md
 ├── AGENT_CONTEXT.md                   ← Architecture & extension guide
-├── requirements.txt                   ← Dependencies
-│
-├── core/                              # Shared utilities
-│   ├── ollama_integration.py          # Ollama client (URL: localhost:11434)
-│   ├── common_utils.py                # Labels, metrics, formatting
-│   ├── domain_feature_engineering.py  # Linguistic features
-│   └── explore_data.py               # Data exploration
-│
-├── task1_classification/              # Classification experiments
-│   ├── task1_classifier_tfidf.py     # TF-IDF + Random Forest
+├── requirements.txt
+├── core/                              ← Shared utilities
+├── task1_classification/              ← Classification experiments
+│   ├── task1_classifier_tfidf.py     # TF-IDF + RF
 │   ├── task1_ollama_classifier.py    # Ollama zero-shot
 │   ├── task1_ollama_fewshot.py       # Ollama few-shot
+│   ├── task1_ensemble.py             # 6 ensemble strategies
 │   └── transformer/                   # DistilBERT approach
-│       ├── config.py                  # Transformer-specific config
-│       ├── fine_tune.py              # Feature extraction + classifier
-│       ├── inference.py              # Inference (legacy)
+│       ├── config.py
+│       ├── transformer.py
 │       └── __init__.py
-│
-├── task2_generation/                  # Generation experiments
+├── task2_generation/                  ← Generation experiments
 │   ├── task2_generator.py            # Template-based
 │   ├── task2_ollama_generator.py     # Ollama generation
 │   └── task2_generator_enhanced.py   # T5 fine-tuning + generation
-│
-├── evaluation/                        # Evaluation tools
-│   └── evaluate.py                   # Unified evaluation (Task 1 + Task 2)
-│
-└── outputs/                           # Results directory
-    ├── comparison.json               # All methods compared
-    ├── predictions_classifiers.json  # Final predictions
-    ├── evaluation_report.json        # Unified evaluation
-    └── fine_tuned_model/             # Saved classifier
-```
-
-### Label Mapping (config.py)
-
-```python
-CLASS_LABELS = ["premise", "conclusion", "none"]
-CLASS_IDS = [0, 1, 2]
-LABEL_TO_ID = {"premise": 0, "conclusion": 1, "none": 2}
-ID_TO_LABEL = {0: "premise", 1: "conclusion", 2: "none"}
-```
-
-### Root Config (config.py)
-
-Single source of truth for:
-- `DATA_CSV_PATH` - Annotation CSV location
-- `OUTPUT_DIR` - Where predictions/reports go
-- `CLASS_LABELS`, `LABEL_TO_ID`, `ID_TO_LABEL` - Label mappings
-- `TRAIN_VAL_SPLIT` = 0.8, `CV_N_FOLDS` = 5
-- `LABEL_SMOOTHING` = 0.1
-- `TRANSFORMER_*` - Model name, batch size, learning rate, epochs, etc.
-- `FEWSHOT_*` - Ollama few-shot parameters
-- `load_data()` - Loads CSV, returns IDs, texts, soft labels, majority labels, implicit texts
-
-### Transformer Device Handling
-
-```python
-# Auto-detect (tries CUDA → MPS → CPU)
-python task1_classification/transformer/transformer.py
-
-# Force specific device
-python task1_classification/transformer/transformer.py --device cpu
-python task1_classification/transformer/transformer.py --device cuda
-python task1_classification/transformer/transformer.py --device mps
-```
-
-MPS has known PyTorch embedding bugs (`Placeholder storage not allocated`). The code handles this:
-1. Uses `device_map="auto"` for proper HuggingFace device placement
-2. Falls back to CPU if `accelerate` isn't installed
-3. Falls back to CPU if `device_map` fails
-
-### Shared Utilities (core/)
-
-**ollama_integration.py**:
-```python
-from core.ollama_integration import OllamaClassifier, OllamaGenerator
-classifier = OllamaClassifier()
-result = classifier.classify("Your text", model="mistral")
-```
-
-**common_utils.py**:
-```python
-from core.common_utils import (
-    label_to_id, id_to_label,
-    compute_classification_metrics, normalize_label
-)
-```
-
-**domain_feature_engineering.py**:
-```python
-from core.domain_feature_engineering import DomainFeatureExtractor
-extractor = DomainFeatureExtractor()
-features = extractor.extract_all_features("Your text")
+├── evaluation/                        ← Evaluation tools
+│   └── evaluate.py                   # Unified evaluation
+└── outputs/                           ← Results
+    ├── comparison_task1.json
+    ├── predictions_classifiers_<METHOD>.json
+    ├── evaluation_report_<METHOD>.json
+    ├── submit_task1_classifiers.json # Full dataset submission
+    ├── submit_task1_test.json        # Test set submission
+    └── task2_t5_model/               # Fine-tuned T5 model
 ```
 
 ---
@@ -454,52 +287,57 @@ features = extractor.extract_all_features("Your text")
 ## Troubleshooting
 
 | Issue | Solution |
-|-------|------|
-| `ModuleNotFoundError: No module named 'core'` | Run from project root, not subdirectory |
-| `Cannot connect to Ollama` | Run `ollama serve` in another terminal. URL: `http://localhost:11434` |
+|--|--|
+| `ModuleNotFoundError: No module named 'core'` | Run from project root |
+| `Cannot connect to Ollama` | Run `ollama serve`. URL: `http://localhost:11434` |
 | `Model mistral not found` | `ollama pull mistral` |
 | `torch.cuda.OutOfMemory` | Reduce `BATCH_SIZE` |
-| `GPU not detected` | Check device: `python -c "import torch; print('CUDA:', torch.cuda.is_available())"` |
-| Scripts hang on first Ollama request | Normal - model loads (~30s), then fast (~5-10s) |
-| JSON output not saved | Ensure `outputs/` directory exists |
-| Transformer output is all "none" | This shouldn't happen with the current feature extraction approach. Check device handling |
-| `device_map='auto' failed` | Install accelerate: `pip install accelerate` |
-| Data file not found | Check `config.py` → `DATA_CSV_PATH` matches your system |
+| `GPU not detected` | `python -c "import torch; print('CUDA:', torch.cuda.is_available())"` |
+| `device_map='auto' failed` | `pip install accelerate` |
+| `Data file not found` | Check `config.py` → `DATA_CSV_PATH` |
 
 ---
 
-## How Scripts Work
+## Technical Notes
 
-All scripts use root `config.py` as the single source of truth:
-- No hardcoded CSV paths
-- No hardcoded output directories
-- No hardcoded label mappings
-- No hardcoded splits
+### How Scripts Work
 
-Scripts that don't need `core/` access (TF-IDF, transformer) import directly from root `config.py` via `sys.path.insert`. Ollama scripts import `core.ollama_integration`.
+All scripts use root `config.py` — no hardcoded CSV paths, output dirs, label mappings, or splits.
 
----
+### Label Mapping (config.py)
 
-## Next Steps
+```python
+CLASS_LABELS = ["premise", "conclusion", "none"]
+LABEL_TO_ID = {"premise": 0, "conclusion": 1, "none": 2}
+ID_TO_LABEL = {0: "premise", 1: "conclusion", 2: "none"}
+TRAIN_VAL_SPLIT = 0.8
+CV_N_FOLDS = 5
+```
 
-1. ✅ All approaches implemented and compared
-2. Transformer is the best method (0.635 F1 2-class)
-3. Consider: ensemble methods, different feature extractors, or active learning
-4. Generation approaches need evaluation
+### Transformer Device Handling
 
----
+```bash
+python task1_classification/transformer/transformer.py       # Auto-detect (CUDA → MPS → CPU)
+python task1_classification/transformer/transformer.py --device cpu
+```
 
-## For Developers
+### Adding New Methods
 
-To extend this system, see [AGENT_CONTEXT.md](AGENT_CONTEXT.md) for:
-- Architecture overview
-- Design decisions
-- How to add new classification/generation approaches
-- Testing patterns
-- Performance optimization
+1. Create file in `task1_classification/`
+2. Import from root `config.py`
+3. Output unified format: `{id, text, label, probabilities, hard_prediction}`
+4. Add to `TASK1_METHODS` in `run_methods.py` and `METHODS` in `task1_ensemble.py`
+5. See [AGENT_CONTEXT.md](AGENT_CONTEXT.md) for full extension guide
+
+### Known Limitations
+
+- **Only 2 available base classifiers without Ollama**: TF-IDF + Transformer. Ensemble diversity is limited.
+- **Ensemble evaluation on training data is meaningless**: The only valid benchmark is the held-out test F1.
+- **Conclusion class is extremely hard**: Only 4.3% of data; best method achieves 0.214 F1.
+- **Ollama requires running server**: Both Ollama methods fail gracefully if Ollama is not running.
 
 ---
 
 **Dataset Source**: MediaEval 2026 Shared Task - Enthymeme Detection  
-**Last Updated**: May 16, 2026  
-**Status**: ✅ All approaches functional and tested
+**Last Updated**: May 27, 2026  
+**Status**: ✅ Classification pipeline complete | Submission files generated in `outputs/`
