@@ -37,6 +37,12 @@ except ImportError:
     TRANSFORMERS_AVAILABLE = False
 
 try:
+    from peft import LoraConfig, get_peft_model, TaskType
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
+
+try:
     from core.ollama_integration import OllamaGenerator, OllamaClient
     OLLAMA_AVAILABLE = True
 except ImportError:
@@ -72,14 +78,26 @@ def load_task1_predictions():
     return predictions
 
 
-def build_training_pairs(data):
+def build_training_pairs(data, random_state=42):
     """Build (source, target) training pairs from the CSV implicit texts.
 
     Returns list of dicts: {'source': str, 'target': str, 'type': 'premise'|'conclusion'}
     Uses the majority_label to determine which implicit text to use.
+    Applies an 80/20 random split (with random_state=42) so test instances
+    are excluded from training, preventing data leakage.
     """
+    n = len(data["df"])
+    rng = np.random.RandomState(random_state)
+    indices = np.arange(n)
+    rng.shuffle(indices)
+    split = int(n * 0.8)
+    train_indices = sorted(indices[:split])
+
+    print(f"  Using {len(train_indices)}/{n} instances for training (80% split, seed=42)")
+
     pairs = []
-    for i, row in data["df"].iterrows():
+    for i in train_indices:
+        row = data["df"].iloc[i]
         label = row["majority_label"]
         if label not in ("premise", "conclusion"):
             continue
@@ -126,14 +144,32 @@ def tokenize_pair(pairs, tokenizer, max_len):
 
 
 def train_t5(pairs, device):
-    """Fine-tune T5 on (source, target) pairs."""
+    """Fine-tune T5 on (source, target) pairs using LoRA for parameter-efficient adaptation."""
     max_len = config.T5_MAX_LENGTH
     batch_size = config.T5_BATCH_SIZE
     num_epochs = config.T5_NUM_EPOCHS
     lr = config.T5_LEARNING_RATE
 
     tokenizer = AutoTokenizer.from_pretrained(T5_MODEL)
-    model = AutoModelForSeq2SeqLM.from_pretrained(T5_MODEL).to(device)
+    base_model = AutoModelForSeq2SeqLM.from_pretrained(T5_MODEL)
+
+    # Apply LoRA adapter -- essential for small dataset (364 pairs)
+    if PEFT_AVAILABLE:
+        lora_config = LoraConfig(
+            r=8,
+            lora_alpha=16,
+            lora_dropout=0.1,
+            target_modules=["q", "k", "v", "o"],  # T5 attention matrices
+            task_type=TaskType.SEQ_2_SEQ_LM,
+        )
+        model = get_peft_model(base_model, lora_config)
+        model.print_trainable_parameters()
+        print("  Using LoRA adapter for parameter-efficient fine-tuning")
+    else:
+        model = base_model
+        print("  WARNING: PEFT not available, training full model (may overfit on small data)")
+
+    model = model.to(device)
 
     # Split into train/val
     from sklearn.model_selection import train_test_split as _train_test_split
@@ -193,11 +229,17 @@ def train_t5(pairs, device):
 
         if avg_val < best_loss:
             best_loss = avg_val
-            # Save best model
-            os.makedirs(T5_MODEL_DIR, exist_ok=True)
-            model.save_pretrained(T5_MODEL_DIR)
-            tokenizer.save_pretrained(T5_MODEL_DIR)
-            print(f"    -> Best model saved")
+            # Save best model -- only adapter weights (base model loaded separately)
+            if PEFT_AVAILABLE and isinstance(model, PeftModel):
+                model.save_pretrained(os.path.join(T5_MODEL_DIR, "peft_adapter"))
+                tokenizer.save_pretrained(T5_MODEL_DIR)
+                # Copy base model config for reference
+                base_model.config.save_pretrained(T5_MODEL_DIR)
+                print(f"    -> Best LoRA adapter saved to peft_adapter/")
+            else:
+                model.save_pretrained(T5_MODEL_DIR)
+                tokenizer.save_pretrained(T5_MODEL_DIR)
+                print(f"    -> Best model saved (full model)")
 
     return model, tokenizer
 
@@ -206,23 +248,52 @@ def train_t5(pairs, device):
 # 3. GENERATION
 # ---------------------------------------------------------------------------
 
+def _template_generate(tweet, task_type):
+    """Template-based fallback for proposition generation."""
+    tweet_lower = tweet.lower()
+    words = tweet_lower.split()
+    mid_idx = max(len(words) // 3, 2)
+    fill_start = max(mid_idx - 3, 0)
+    fill = " ".join(words[fill_start:fill_start + 6])
+
+    if task_type == "premise":
+        templates = [
+            f"This tweet assumes that {fill.capitalize()}.",
+            f"Underlying this statement is the belief that {fill.capitalize()}.",
+            f"The argument assumes {fill.capitalize()}.",
+        ]
+    else:
+        templates = [
+            f"Therefore, the implicit conclusion is that {fill.capitalize()}.",
+            f"This reasoning leads to the conclusion that {fill.capitalize()}.",
+            f"The natural inference is that {fill.capitalize()}.",
+        ]
+
+    import hashlib
+    idx = int(hashlib.md5(tweet.encode()).hexdigest()[:4], 16) % len(templates)
+    return templates[idx]
+
+
 def generate_with_t5(model, tokenizer, texts, predictions, device):
-    """Generate propositions using T5."""
+    """Generate propositions using T5 with template fallback for empty outputs."""
     results = []
-    pred_labels = {p["hard_prediction"]: p["label"] for p in predictions}
-    pred_probs = {p["hard_prediction"]: p.get("probabilities", {}) for p in predictions}
+
+    # Build lookup: id -> prediction (not hard_prediction key)
+    id2pred = {int(p["id"]): p for p in predictions}
 
     for pred in tqdm(predictions, desc="T5 Generation"):
         pid = pred["id"]
         tweet = pred["text"]
-        label = pred_labels.get(pred["hard_prediction"], "none")
+        label = pred.get("label", "none")
+        probs = pred.get("probabilities", {})
+        confidence = float(max(probs.values())) if probs else 0.0
 
         if label == "none":
             results.append({
                 "id": pid,
                 "tweet": tweet,
                 "predicted_label": label,
-                "confidence": float(max(pred_probs.get(pid, {}).values())) if pred_probs.get(pid) else 0.0,
+                "confidence": confidence,
                 "generated_proposition": None,
             })
             continue
@@ -242,11 +313,15 @@ def generate_with_t5(model, tokenizer, texts, predictions, device):
             )
         generated = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
+        # Fallback to templates if T5 produces empty output
+        if not generated or generated.strip() == "":
+            generated = _template_generate(tweet, task_type)
+
         results.append({
             "id": pid,
             "tweet": tweet,
             "predicted_label": label,
-            "confidence": float(max(pred_probs.get(pid, {}).values())) if pred_probs.get(pid) else 0.0,
+            "confidence": confidence,
             "generated_proposition": generated,
         })
 
@@ -270,7 +345,10 @@ def generate_with_ollama(predictions):
     results = generator.generate_batch(tweets, labels, show_progress=True)
 
     # Add confidence from classifier probabilities
-    for r, p in zip(results, predictions):
+    id2pred = {int(p["id"]): p for p in predictions}
+    for r in results:
+        pid = int(r.get("id", 0))
+        p = id2pred.get(pid, {})
         probs = p.get("probabilities", {})
         r["confidence"] = float(max(probs.values())) if probs else 0.0
 
@@ -362,7 +440,7 @@ def main():
                 pairs = json.load(f)
             print(f"\nLoaded {len(pairs)} training pairs from cache")
         else:
-            pairs = build_training_pairs(data)
+            pairs = build_training_pairs(data, random_state=42)
             with open(T5_TRAIN_PAIRS_FILE, "w") as f:
                 json.dump(pairs, f)
             print(f"\nBuilt and cached {len(pairs)} training pairs")

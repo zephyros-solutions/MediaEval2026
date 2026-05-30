@@ -49,10 +49,10 @@ def run_svm():
     df = data["df"]
     texts = np.array(data["texts"])
 
-    split_idx = int(len(df) * config.TRAIN_VAL_SPLIT)
-    train_texts, train_labels = texts[:split_idx], data["majority_labels"][:split_idx]
-    test_texts, test_labels = texts[split_idx:], data["majority_labels"][split_idx:]
-    test_ids = [int(df.iloc[i]["id"]) for i in range(split_idx, len(df))]
+    train_idx, test_idx = config.get_train_test_indices(len(df))
+    train_texts, train_labels = texts[train_idx], data["majority_labels"][train_idx]
+    test_texts, test_labels = texts[test_idx], data["majority_labels"][test_idx]
+    test_ids = [int(df.iloc[i]["id"]) for i in test_idx]
 
     base_svm = LinearSVC(dual="auto", max_iter=5000, random_state=RANDOM_STATE)
     pipe = Pipeline([
@@ -93,7 +93,7 @@ def run_svm():
 
     y_true = test_labels
     y_pred = test_preds
-    metrics, per_class = compute_metrics(y_true, y_pred, prob_dicts, [data["ann_labels"][i] for i in range(split_idx, len(df))], "tfidf_svm")
+    metrics, per_class = compute_metrics(y_true, y_pred, prob_dicts, [data["ann_labels"][i] for i in test_idx], "tfidf_svm")
 
     report = {
         "method": "tfidf_svm",
@@ -146,21 +146,27 @@ def run_svm_for_ensemble():
 # ============================================================
 
 def run_xgboost():
-    """Standalone: TF-IDF + XGBoost with 5-fold CV."""
+    """Standalone: TF-IDF + XGBoost with 5-fold CV.
+
+    Uses CalibratedClassifierCV to correct XGBoost's overconfident softmax
+    probabilities, matching the calibration applied to the SVM classifier.
+    """
     try:
         import xgboost as xgb  # noqa: F401
     except ImportError:
         print("  [XGB] xgboost not installed, skipping")
         return None, None
 
+    from sklearn.calibration import CalibratedClassifierCV
+
     data = config.load_data()
     df = data["df"]
     texts = np.array(data["texts"])
 
-    split_idx = int(len(df) * config.TRAIN_VAL_SPLIT)
-    train_texts, train_labels = texts[:split_idx], data["majority_labels"][:split_idx]
-    test_texts, test_labels = texts[split_idx:], data["majority_labels"][split_idx:]
-    test_ids = [int(df.iloc[i]["id"]) for i in range(split_idx, len(df))]
+    train_idx, test_idx = config.get_train_test_indices(len(df))
+    train_texts, train_labels = texts[train_idx], data["majority_labels"][train_idx]
+    test_texts, test_labels = texts[test_idx], data["majority_labels"][test_idx]
+    test_ids = [int(df.iloc[i]["id"]) for i in test_idx]
 
     vec = TfidfVectorizer(**config.TFIDF_DEFAULTS)
     X_train = vec.fit_transform(train_texts)
@@ -185,11 +191,15 @@ def run_xgboost():
     grid.fit(X_train_dense, train_labels)
     print(f"  [XGB] Best params: {grid.best_params_}  F1={grid.best_score_:.4f}")
 
-    y_pred = grid.best_estimator_.predict(X_test_dense)
-    y_proba = grid.best_estimator_.predict_proba(X_test_dense)
+    # Calibrate the best estimator to correct overconfident softmax probabilities
+    best_clf = CalibratedClassifierCV(grid.best_estimator_, cv=5, method='sigmoid')
+    best_clf.fit(X_train_dense, train_labels)
 
-    predictions, prob_dicts = __build_predictions(test_ids, test_texts, y_pred, y_proba, data, split_idx)
-    metrics, per_class = compute_metrics(test_labels, y_pred, prob_dicts, [data["ann_labels"][i] for i in range(split_idx, len(df))], "tfidf_xgboost")
+    y_pred = best_clf.predict(X_test_dense)
+    y_proba = best_clf.predict_proba(X_test_dense)
+
+    predictions, prob_dicts = __build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx)
+    metrics, per_class = compute_metrics(test_labels, y_pred, prob_dicts, [data["ann_labels"][i] for i in test_idx], "tfidf_xgboost")
 
     report = {
         "method": "tfidf_xgboost",
@@ -203,7 +213,13 @@ def run_xgboost():
 
 
 def run_xgboost_for_ensemble():
-    """Train TF-IDF + XGBoost on ALL data."""
+    """Train TF-IDF + XGBoost on ALL data.
+
+    Wraps XGBoost with CalibratedClassifierCV to correct overconfident softmax
+    probabilities, ensuring fair weighted voting with SVM's well-calibrated outputs.
+    """
+    from sklearn.calibration import CalibratedClassifierCV
+
     try:
         import xgboost as xgb
     except ImportError:
@@ -218,16 +234,20 @@ def run_xgboost_for_ensemble():
     X = vec.fit_transform(data["texts"])
     X_dense = X.toarray()
 
-    clf = xgb.XGBClassifier(
+    base_clf = xgb.XGBClassifier(
         n_estimators=100, max_depth=5, learning_rate=0.1,
         subsample=1.0, colsample_bytree=1.0, reg_alpha=0, reg_lambda=1.0,
         min_child_weight=1, use_label_encoder=False, eval_metric="mlogloss",
         random_state=RANDOM_STATE,
     )
-    clf.fit(X_dense, data["majority_labels"])
+    base_clf.fit(X_dense, data["majority_labels"])
 
-    all_preds = clf.predict(X_dense)
-    all_proba = clf.predict_proba(X_dense)
+    # Calibrate to correct overconfident softmax probabilities
+    calibrated = CalibratedClassifierCV(base_clf, cv=5, method='sigmoid')
+    calibrated.fit(X_dense, data["majority_labels"])
+
+    all_preds = calibrated.predict(X_dense)
+    all_proba = calibrated.predict_proba(X_dense)
 
     predictions = []
     for i in range(len(data["texts"])):
@@ -238,7 +258,7 @@ def run_xgboost_for_ensemble():
             "probabilities": probs, "hard_prediction": int(all_preds[i]),
         })
 
-    artifacts = {"classifier": clf, "vectorizer": vec, "labels": data["majority_labels"]}
+    artifacts = {"classifier": calibrated, "vectorizer": vec, "labels": data["majority_labels"]}
     return predictions, {"method": "tfidf_xgboost_full"}, artifacts
 
 
@@ -255,10 +275,10 @@ def run_sbert():
     df = data["df"]
     texts = np.array(data["texts"])
 
-    split_idx = int(len(df) * config.TRAIN_VAL_SPLIT)
-    train_texts, train_labels = texts[:split_idx], data["majority_labels"][:split_idx]
-    test_texts, test_labels = texts[split_idx:], data["majority_labels"][split_idx:]
-    test_ids = [int(df.iloc[i]["id"]) for i in range(split_idx, len(df))]
+    train_idx, test_idx = config.get_train_test_indices(len(df))
+    train_texts, train_labels = texts[train_idx], data["majority_labels"][train_idx]
+    test_texts, test_labels = texts[test_idx], data["majority_labels"][test_idx]
+    test_ids = [int(df.iloc[i]["id"]) for i in test_idx]
 
     print("  [SBERT] Loading all-MiniLM-L6-v2...")
     model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -283,8 +303,8 @@ def run_sbert():
     y_pred = grid.best_estimator_.predict(X_test)
     y_proba = grid.best_estimator_.predict_proba(X_test)
 
-    predictions, prob_dicts = __build_predictions(test_ids, test_texts, y_pred, y_proba, data, split_idx)
-    metrics, per_class = compute_metrics(test_labels, y_pred, prob_dicts, [data["ann_labels"][i] for i in range(split_idx, len(df))], "sbert_lr")
+    predictions, prob_dicts = __build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx)
+    metrics, per_class = compute_metrics(test_labels, y_pred, prob_dicts, [data["ann_labels"][i] for i in test_idx], "sbert_lr")
 
     report = {
         "method": "sbert_lr",
@@ -343,10 +363,10 @@ def run_cross_encoder():
     df = data["df"]
     texts = np.array(data["texts"])
 
-    split_idx = int(len(df) * config.TRAIN_VAL_SPLIT)
-    train_texts, train_labels = texts[:split_idx], data["majority_labels"][:split_idx]
-    test_texts, test_labels = texts[split_idx:], data["majority_labels"][split_idx:]
-    test_ids = [int(df.iloc[i]["id"]) for i in range(split_idx, len(df))]
+    train_idx, test_idx = config.get_train_test_indices(len(df))
+    train_texts, train_labels = texts[train_idx], data["majority_labels"][train_idx]
+    test_texts, test_labels = texts[test_idx], data["majority_labels"][test_idx]
+    test_ids = [int(df.iloc[i]["id"]) for i in test_idx]
 
     class_descriptions = {
         0: "This tweet contains an unstated premise — a hidden assumption that supports the argument.",
@@ -406,8 +426,8 @@ def run_cross_encoder():
     y_pred = grid.best_estimator_.predict(X_test)
     y_proba = grid.best_estimator_.predict_proba(X_test)
 
-    predictions, prob_dicts = __build_predictions(test_ids, test_texts, y_pred, y_proba, data, split_idx)
-    metrics, per_class = compute_metrics(test_labels, y_pred, prob_dicts, [data["ann_labels"][i] for i in range(split_idx, len(df))], "cross_encoder_lr")
+    predictions, prob_dicts = __build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx)
+    metrics, per_class = compute_metrics(test_labels, y_pred, prob_dicts, [data["ann_labels"][i] for i in test_idx], "cross_encoder_lr")
 
     report = {
         "method": "cross_encoder_lr",
@@ -475,7 +495,7 @@ def run_cross_encoder_for_ensemble():
 # Helpers
 # ============================================================
 
-def __build_predictions(test_ids, test_texts, y_pred, y_proba, data, split_idx):
+def __build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx):
     """Build predictions list and prob_dicts from raw outputs."""
     predictions = []
     prob_dicts = []

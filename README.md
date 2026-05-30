@@ -2,7 +2,7 @@
 
 **Scientific inquiry** into detecting implicit arguments (premises and conclusions) in tweets and generating missing propositions. Systematic experimentation with multiple approaches.
 
-**Status**: Classification pipeline complete | Submission files generated | **Last Updated**: May 27, 2026
+**Status**: Classification pipeline complete | Submission files generated | **Last Updated**: May 30, 2026
 
 ---
 
@@ -40,14 +40,27 @@ These are the **only meaningful** F1 scores — computed on held-out data, not t
 |--------|------|------|------|--|------|
 | **Transformer** | DistilBERT features + LogisticRegression | **0.635** | **0.470** | 0.955 | ~29s |
 | TF-IDF + RF | Statistical | 0.432 | 0.277 | 0.815 | ~21s |
+| TF-IDF + SVM | Statistical | — | — | — | — |
+| TF-IDF + XGBoost | Statistical | — | — | — | — |
+| SBERT + LR | Semantic features + LR | — | — | — | — |
 | Ollama Zero-shot | LLM (local) | 0.419 | 0.060 | 2.250 | ~43min |
 | Ollama Few-shot | LLM + prompting | 0.399 | 0.141 | 24.611 | ~55min |
 
 **Winner**: DistilBERT feature extraction + classifier
 
-### Important Note on Ensemble Scores
+### Submission Ensemble (5 Classifiers)
 
-The only valid benchmark is the Transformer's **0.470 F1(3-class)** on the held-out 20% split. The ensemble's best F1(3-class) is **0.472** — matching the Transformer because voting-based ensembles with only 2 base classifiers cannot add diversity. Ensembles require more diverse base classifiers to improve over standalone approaches.
+The final submission uses weighted soft voting across 5 diverse classifiers:
+
+| Classifier | Weight |
+|-----------|--------|
+| Transformer (DistilBERT + LR) | 0.470 |
+| SBERT + LR | 0.306 |
+| TF-IDF + XGBoost | 0.302 |
+| TF-IDF + RF | 0.277 |
+| TF-IDF + SVM | 0.249 |
+
+**Key insight**: Voting-based ensembles with only 2 classifiers cannot improve over the best standalone. With 5 diverse classifiers, weighted voting aggregates their strengths.
 
 ---
 
@@ -79,9 +92,13 @@ cd /path/to/project
 
 ```bash
 ollama serve                    # Start server
-ollama pull mistral             # Download model
+ollama pull mistral             # Download base model
+ollama pull gemma4              # Prefer: better generation quality
+ollama pull qwen3.6             # Fallback: good generation quality
 python -c "from core.ollama_integration import OllamaClient; OllamaClient().test_connection()"
 ```
+
+**URL auto-detection**: Ollama URL is auto-detected at runtime — tries `host.docker.internal:11434` first (Docker/Linux), falls back to `localhost:11434` (Mac native).
 
 ---
 
@@ -112,16 +129,17 @@ This calls `submit.run_all_and_submit()` which:
 
 ```bash
 # Classification
-python task1_classification/task1_classifier_tfidf.py
-python task1_classification/transformer/transformer.py
-python task1_classification/task1_ollama_classifier.py
-python task1_classification/task1_ollama_fewshot.py
+python task1_classification/task1_classifier_tfidf.py        # TF-IDF + Random Forest
+python task1_classification/transformer/transformer.py       # DistilBERT features
+python task1_classification/task1_ollama_classifier.py       # Ollama zero-shot
+python task1_classification/task1_ollama_fewshot.py          # Ollama few-shot
 python task1_classification/task1_ensemble.py --method all   # Run all 6 ensemble strategies
+python task1_classification/new_classifiers.py               # SVM, XGBoost, SBERT
 
 # Generation
-python task2_generation/task2_generator.py           # Template-based
-python task2_generation/task2_ollama_generator.py    # Ollama
-python task2_generation/task2_generator_enhanced.py --both   # T5 train + generate
+python task2_generation/task2_generator.py                      # Template-based
+python task2_generation/task2_ollama_generator.py               # Ollama (gemma4 → qwen3.6 → mistral)
+python task2_generation/task2_generator_enhanced.py --both      # T5 train + generate
 ```
 
 ---
@@ -170,37 +188,54 @@ All classifiers output predictions in unified format:
 - Final model: Balanced LogisticRegression on 80% train split
 - F1: **0.635 (2-class), 0.470 (3-class)** — the best approach
 
-#### 4. Ensemble Methods
+#### 4. New Classifiers (SVM, XGBoost, SBERT)
 
-**File**: `task1_classification/task1_ensemble.py`
+**File**: `task1_classification/new_classifiers.py`
 
-6 strategies evaluated on the SAME held-out 20% test split as standalone methods:
+- **TF-IDF + LinearSVC**: Linear kernel SVM on TF-IDF features
+- **TF-IDF + XGBoost**: Gradient boosting on TF-IDF features
+- **SBERT + LR**: all-MiniLM-L6-v2 sentence embeddings + LogisticRegression
+
+#### 5. Ensemble Methods (task1_ensemble.py)
+
+6 strategies evaluated on the SAME held-out 20% test split:
 
 | Method | F1(3-class) | F1(2-class) | CE | Description |
 |--|--|--|--|--|
 | soft_voting | **0.4723** | **0.6278** | 1.021 | Average probability vectors |
-| weighted_voting | **0.4723** | **0.6278** | 1.005 | Weight by CV F1 (Transformer ~0.47, TF-IDF ~0.28) |
+| weighted_voting | **0.4723** | **0.6278** | 1.005 | Weight by CV F1 |
 | majority_voting | **0.4723** | **0.6278** | 6.509 | Hard vote (argmax) |
-| feature_fusion | 0.4300 | 0.5983 | 1.001 | TF-IDF + DistilBERT features concatenated + LogisticRegression |
-| sbert | 0.4047 | 0.5694 | 0.921 | SBERT embeddings (all-MiniLM-L6-v2) + LogisticRegression |
-| bagging | 0.2838 | 0.4222 | 0.809 | 10 Random Forest models on bootstrapped data |
+| feature_fusion | 0.4300 | 0.5983 | 1.001 | TF-IDF + DistilBERT features + LR |
+| sbert | 0.4047 | 0.5694 | 0.921 | SBERT embeddings + LR |
+| bagging | 0.2838 | 0.4222 | 0.809 | 10 Random Forests on bootstrapped data |
 
 ```bash
-python task1_classification/task1_ensemble.py --method soft_voting
 python task1_classification/task1_ensemble.py --method all
 ```
 
-**Key finding**: Voting-based ensembles (soft_voting, weighted_voting, majority_voting) produce identical results because with only 2 base classifiers there is no diversity to exploit. The ensemble F1 matches the Transformer alone, confirming that ensembles require more diverse base classifiers to improve over standalone approaches.
+**Key finding**: With only 2 base classifiers, voting-based ensembles produce identical results. With 5 diverse classifiers in the final submission, weighted voting aggregates their complementary strengths.
 
-#### 5. Submission
+#### 6. Final Submission Ensemble
 
-**File**: `submit.py`
+The final submission uses **weighted soft voting** across 5 classifiers. Weights are derived from each classifier's CV F1 score on the held-out 20% test split:
+
+```python
+ENSEMBLE_WEIGHTS = {
+    "transformer":     0.470,  # DistilBERT features + LR
+    "sbert_lr":        0.306,  # SBERT embeddings + LR
+    "tfidf_xgb":       0.302,  # TF-IDF + XGBoost
+    "tfidf_rf":        0.277,  # TF-IDF + Random Forest
+    "tfidf_svm":       0.249,  # TF-IDF + LinearSVC
+}
+```
+
+#### 7. Submission (submit.py)
 
 ```bash
 python submit.py --run-all       # Run everything + compare + submit
 python submit.py --task1         # Task 1 submission only
-python submit.py --task2 --t5    # Task 2 with T5
-python submit.py --task2 --ollama # Task 2 with Ollama
+python submit.py --task2 --t5    # Task 2 with T5 (flan-t5-base + LoRA)
+python submit.py --task2 --ollama # Task 2 with Ollama (gemma4 → qwen3.6 → mistral)
 ```
 
 Also callable as a function:
@@ -210,9 +245,66 @@ best_name, best_metrics, test_sub, full_sub = run_all_and_submit()
 submission, full_submission = submit_task1()
 ```
 
-- Trains TF-IDF + Transformer on ALL 1333 annotated instances
-- Generates predictions for test set (148 tweets) via weighted soft voting ensemble
-- Outputs: `submit_task1_test.json` + `submit_task1_classifiers.json` in challenge format
+- Trains 5 classifiers on ALL 1333 annotated instances
+- Generates predictions for test set (148 tweets) via weighted soft voting (5 classifiers)
+- Task 2: Trains flan-t5-base + LoRA (or uses Ollama) on 364 training instances
+- Outputs: `submit_task1_test.json` + `submit_task1_classifiers.json` + `submit_task2_propositions.json` in challenge format
+
+---
+
+## Task 2: Proposition Generation
+
+Two tested standalone methods (each in its own file):
+
+### 1. Ollama (Recommended)
+**File**: `task2_generation/ollama_generator.py`
+**CLI**: `python submit.py --task2 --ollama`
+
+- Prefer `gemma4` → `qwen3.6` → `mistral` (auto-detected from available Ollama models)
+- High quality generation, ~2 min for 148 test instances
+- Also callable: `from submit import submit_task2_ollama; submit_task2_ollama()`
+
+### 2. T5 + LoRA
+**File**: `task2_generation/t5_finetune.py`
+**CLI**: `python task2_generation/t5_finetune.py` or `python submit.py --task2 --t5`
+
+- `google/flan-t5-base` (250M params) fine-tuned with LoRA on 364 training instances
+- LoRA adapter: r=8, α=16, dropout=0.1 on attention matrices
+- Trains in ~5 min, generates in ~30s
+- Also callable: `from submit import submit_task2_t5; submit_task2_t5()`
+
+### submit.py Task 2 CLI
+
+```bash
+python submit.py --task2 --t5    # Train flan-t5-base + LoRA if needed, then generate
+python submit.py --task2 --ollama # Use Ollama (auto-selects best model)
+```
+
+### submit.py Task 2 CLI
+
+```bash
+python submit.py --task2 --t5    # Train flan-t5-base + LoRA if needed, then generate
+python submit.py --task2 --ollama # Use Ollama (auto-selects best model)
+```
+
+### Task 2: Abandoned Methods
+
+The following standalone scripts were original prototypes that were consolidated into `submit.py`. They remain (renamed with `_not_used` suffix) as reference but are never imported or called:
+
+| File | Method | Why abandoned |
+|---|---|---|
+| `task2_generation/task2_generator.py_not_used` | Template-based fill-in-the-blank | Inline template code removed from submit.py; no longer referenced |
+| `task2_generation/task2_ollama_generator.py_not_used` | Ollama LLM (mistral) | Ollama generation extracted to `ollama_generator.py`; original used mistral only |
+| `task2_generation/task2_generator_enhanced.py_not_used` | T5 + LoRA fine-tuning | T5 training logic extracted to `t5_finetune.py`; standalone training logic removed from submit.py |
+
+### Task 2: Classification as Generation Attempt
+
+Some Task 1 classification methods were tested as Task 2 generation approaches:
+
+| Method | Why it didn't work |
+|---|---|
+| `task1_ollama_fewshot.py` | CE=24.6 — probability calibration completely broken; predictions unusable |
+| `task1_ensemble.py` (soft/weighted/majority voting) | Not a generation method — produces class labels, not natural language propositions |
 
 ---
 
@@ -258,21 +350,28 @@ MediaEval/2026/
 ├── AGENT_CONTEXT.md                   ← Architecture & extension guide
 ├── requirements.txt
 ├── core/                              ← Shared utilities
+│   ├── ollama_integration.py         # Ollama client (auto-detect URL)
+│   ├── common_utils.py_not_used      # Abandoned: unused
+│   ├── domain_feature_engineering.py_not_used  # Abandoned: unused
+│   └── explore_data.py_not_used      # Abandoned: unused
 ├── task1_classification/              ← Classification experiments
 │   ├── task1_classifier_tfidf.py     # TF-IDF + RF
 │   ├── task1_ollama_classifier.py    # Ollama zero-shot
 │   ├── task1_ollama_fewshot.py       # Ollama few-shot
 │   ├── task1_ensemble.py             # 6 ensemble strategies
+│   ├── new_classifiers.py            # SVM, XGBoost, SBERT
 │   └── transformer/                   # DistilBERT approach
-│       ├── config.py
 │       ├── transformer.py
-│       └── __init__.py
-├── task2_generation/                  ← Generation experiments
-│   ├── task2_generator.py            # Template-based
-│   ├── task2_ollama_generator.py     # Ollama generation
-│   └── task2_generator_enhanced.py   # T5 fine-tuning + generation
+│       └── inference.py
+├── task2_generation/                  ← Generation (standalone method files)
+│   ├── t5_finetune.py                # T5 + LoRA fine-tuning + generation (tested)
+│   ├── ollama_generator.py           # Ollama LLM generation (tested)
+│   ├── task2_generator.py_not_used   # Abandoned: template-based prototype
+│   ├── task2_ollama_generator.py_not_used  # Abandoned: Ollama prototype
+│   └── task2_generator_enhanced.py_not_used  # Abandoned: T5 prototype
 ├── evaluation/                        ← Evaluation tools
-│   └── evaluate.py                   # Unified evaluation
+│   ├── evaluate_test.py              # Test set evaluation
+│   └── metrics.py                    # Metric functions
 └── outputs/                           ← Results
     ├── comparison_task1.json
     ├── predictions_classifiers_<METHOD>.json
@@ -289,12 +388,14 @@ MediaEval/2026/
 | Issue | Solution |
 |--|--|
 | `ModuleNotFoundError: No module named 'core'` | Run from project root |
-| `Cannot connect to Ollama` | Run `ollama serve`. URL: `http://localhost:11434` |
+| `Cannot connect to Ollama` | Run `ollama serve`. URL auto-detected (host.docker.internal → localhost) |
+| `Model gemma4/qwen3.6 not found` | `ollama pull gemma4` or `ollama pull qwen3.6` |
 | `Model mistral not found` | `ollama pull mistral` |
 | `torch.cuda.OutOfMemory` | Reduce `BATCH_SIZE` |
 | `GPU not detected` | `python -c "import torch; print('CUDA:', torch.cuda.is_available())"` |
 | `device_map='auto' failed` | `pip install accelerate` |
 | `Data file not found` | Check `config.py` → `DATA_CSV_PATH` |
+| T5 generates empty strings | Install PEFT: `pip install peft` for LoRA fine-tuning |
 
 ---
 
@@ -331,13 +432,29 @@ python task1_classification/transformer/transformer.py --device cpu
 
 ### Known Limitations
 
-- **Only 2 available base classifiers without Ollama**: TF-IDF + Transformer. Ensemble diversity is limited.
 - **Ensemble evaluation on training data is meaningless**: The only valid benchmark is the held-out test F1.
 - **Conclusion class is extremely hard**: Only 4.3% of data; best method achieves 0.214 F1.
 - **Ollama requires running server**: Both Ollama methods fail gracefully if Ollama is not running.
+- **T5 requires PEFT for small dataset**: Without peft, flan-t5-base overfits on 364 training instances.
+- **Generation quality is lexical**: Task 2 evaluation uses word-overlap (BLEU-style), not semantic similarity.
+
+### Submission Checklist
+
+All submission files are in `outputs/` and verified:
+
+| File | Status | Details |
+|------|--------|---------|
+| `submit_task1_test.json` | Ready | 148 entries, all have probabilities |
+| `submit_task1_classifiers.json` | Ready | 1333 entries, all have probabilities |
+| `submit_task2_propositions.json` | Ready | 148 entries, 18 generated (17 premise + 1 conclusion) |
+
+**Submission format verified:**
+- Task 1: `{id, text, label, probabilities, hard_prediction}` — all 5 keys present
+- Task 2: `{id, tweet_text, predicted_label, confidence, generated_proposition}` — all 5 keys present
+- IDs consistent across all files (test: 148, full: 1333)
 
 ---
 
 **Dataset Source**: MediaEval 2026 Shared Task - Enthymeme Detection  
-**Last Updated**: May 27, 2026  
-**Status**: ✅ Classification pipeline complete | Submission files generated in `outputs/`
+**Last Updated**: May 30, 2026  
+**Status**: All submission files ready in `outputs/`

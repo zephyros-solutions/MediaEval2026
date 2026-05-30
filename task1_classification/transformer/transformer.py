@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import config
 from config import (
     LABEL_TO_ID, ID_TO_LABEL, CLASS_LABELS, OUTPUT_DIR,
-    TRAIN_VAL_SPLIT, CV_N_FOLDS, RANDOM_STATE, get_device,
+    CV_N_FOLDS, RANDOM_STATE, get_device,
     TRANSFORMER_MODEL_NAME, TRANSFORMER_BATCH_SIZE, TRANSFORMER_LEARNING_RATE, TRANSFORMER_EPOCHS, TRANSFORMER_MAX_LENGTH,
 )
 from evaluation.metrics import compute_metrics
@@ -233,12 +233,12 @@ def _run_transformer_pipeline(device_arg=None, save_model=False):
     print("PHASE 2: Final model on training data")
     print("=" * 80)
 
-    split_idx = int(len(df) * TRAIN_VAL_SPLIT)
-    df_train = df.iloc[:split_idx].reset_index(drop=True)
-    df_val = df.iloc[split_idx:].reset_index(drop=True)
+    train_idx, test_idx = config.get_train_test_indices(len(df))
+    df_train = df.iloc[train_idx].reset_index(drop=True)
+    df_val = df.iloc[test_idx].reset_index(drop=True)
 
-    X_train = X_all_norm[:split_idx]
-    X_val = X_all_norm[split_idx:]
+    X_train = X_all_norm[train_idx]
+    X_val = X_all_norm[test_idx]
     y_train = df_train["label"].values
     y_val = df_val["label"].values
 

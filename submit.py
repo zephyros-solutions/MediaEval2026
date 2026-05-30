@@ -294,139 +294,22 @@ def train_and_predict_sbert_for_ensemble():
 # ============== TASK 2: PROPOSITION GENERATION SUBMISSION ==============
 
 def submit_task2_t5():
-    """Generate propositions using fine-tuned T5 on full data."""
-    print("\n" + "=" * 60)
-    print("TASK 2: T5 PROPOSITION GENERATION")
-    print("=" * 60)
+    """Generate propositions using fine-tuned T5 (+ LoRA).
 
-    from task2_generation.task2_generator_enhanced import load_task1_predictions, build_training_pairs, train_t5, generate_with_t5
-
-    data = config.load_data()
-    pairs = build_training_pairs(data)
-    premise_count = sum(1 for p in pairs if p["type"] == "premise")
-    conclusion_count = sum(1 for p in pairs if p["type"] == "conclusion")
-    print(f"\nTraining pairs: {len(pairs)} (premise: {premise_count}, conclusion: {conclusion_count})")
-
-    device, device_name = config.get_device()
-    print(f"Device: {device_name}")
-
-    T5_MODEL_DIR = os.path.join(OUTPUT_DIR, "task2_t5_model")
-    if os.path.exists(T5_MODEL_DIR):
-        print(f"\nLoading pre-trained T5 from {T5_MODEL_DIR}...")
-        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-        model = AutoModelForSeq2SeqLM.from_pretrained(T5_MODEL_DIR).to(device)
-        tokenizer = AutoTokenizer.from_pretrained(T5_MODEL_DIR)
-        print("  Model loaded.")
-    else:
-        print(f"\nNo pre-trained T5 found. Run with --train-t5 to train one first.")
-        return None
-
-    predictions = load_task1_predictions()
-    print(f"Loaded {len(predictions)} task1 predictions")
-
-    print("\nGenerating propositions...")
-    generated = generate_with_t5(model, tokenizer, None, predictions, device)
-
-    test_df = pd.read_csv(TEST_CSV)
-    test_ids = set(test_df["id"].tolist())
-
-    test_propositions = []
-    for g in generated:
-        if g["id"] in test_ids:
-            test_propositions.append({
-                "id": g["id"],
-                "tweet_text": g.get("tweet", ""),
-                "predicted_label": g.get("predicted_label", "none"),
-                "confidence": g.get("confidence", 0.0),
-                "generated_proposition": g.get("generated_proposition"),
-            })
-
-    generated_ids = {p["id"] for p in test_propositions}
-    for _, row in test_df.iterrows():
-        pid = int(row["id"])
-        if pid not in generated_ids:
-            test_propositions.append({
-                "id": pid,
-                "tweet_text": row["tweet_text"],
-                "predicted_label": "none",
-                "confidence": 0.0,
-                "generated_proposition": None,
-            })
-
-    test_propositions.sort(key=lambda x: x["id"])
-    prop_path = os.path.join(OUTPUT_DIR, "submit_task2_propositions.json")
-    with open(prop_path, "w") as f:
-        json.dump(test_propositions, f, indent=2)
-    print(f"   Test propositions saved to {prop_path}")
-
-    gen_count = sum(1 for p in test_propositions if p.get("generated_proposition"))
-    print(f"   Generated: {gen_count}/{len(test_propositions)}")
-    return test_propositions
+    Trains from scratch if no pre-trained model exists, then generates
+    propositions for test predictions. Delegates to task2_generation/t5_finetune.py.
+    """
+    from task2_generation.t5_finetune import train_and_generate
+    return train_and_generate()
 
 
 def submit_task2_ollama():
-    """Generate propositions using Ollama (Mistral)."""
-    print("\n" + "=" * 60)
-    print("TASK 2: OLLAMA PROPOSITION GENERATION")
-    print("=" * 60)
+    """Generate propositions using Ollama LLM (gemma4 > qwen3.6 > mistral).
 
-    try:
-        from core.ollama_integration import OllamaClient, OllamaGenerator
-    except ImportError:
-        print("  Ollama integration not available.")
-        return None
-
-    client = OllamaClient()
-    if not client.check_connection():
-        print("  WARNING: Ollama not running. Skipping Ollama generation.")
-        return None
-
-    generator = OllamaGenerator(model="mistral", client=client)
-    data = config.load_data()
-    texts = data["texts"]
-    majority_labels = data["majority_labels"]
-    label_strings = [config.ID_TO_LABEL[int(l)] for l in majority_labels]
-
-    print("\nGenerating propositions with Ollama...")
-    results = generator.generate_batch(texts, label_strings, show_progress=True)
-
-    test_df = pd.read_csv(TEST_CSV)
-    test_ids = set(test_df["id"].tolist())
-
-    test_propositions = []
-    id2row = {int(data["df"].iloc[i]["id"]): data["df"].iloc[i] for i in range(len(data["df"]))}
-    for r in results:
-        pid = int(r.get("id", 0))
-        if pid in test_ids:
-            test_propositions.append({
-                "id": pid,
-                "tweet_text": r.get("tweet", ""),
-                "predicted_label": r.get("label", "none"),
-                "confidence": 0.0,
-                "generated_proposition": r.get("generated_proposition"),
-            })
-
-    generated_ids = {p["id"] for p in test_propositions}
-    for _, row in test_df.iterrows():
-        pid = int(row["id"])
-        if pid not in generated_ids:
-            test_propositions.append({
-                "id": pid,
-                "tweet_text": row["tweet_text"],
-                "predicted_label": "none",
-                "confidence": 0.0,
-                "generated_proposition": None,
-            })
-
-    test_propositions.sort(key=lambda x: x["id"])
-    prop_path = os.path.join(OUTPUT_DIR, "submit_task2_propositions_ollama.json")
-    with open(prop_path, "w") as f:
-        json.dump(test_propositions, f, indent=2)
-    print(f"   Test propositions saved to {prop_path}")
-
-    gen_count = sum(1 for p in test_propositions if p.get("generated_proposition"))
-    print(f"   Generated: {gen_count}/{len(test_propositions)}")
-    return test_propositions
+    Delegates to task2_generation/ollama_generator.py.
+    """
+    from task2_generation.ollama_generator import generate_with_ollama
+    return generate_with_ollama()
 
 
 # ============== RUN ALL & SUBMIT ==============
@@ -610,11 +493,21 @@ def run_all_and_submit():
 
     # ---- Task 2: Generate propositions ----
     print("\n" + "=" * 60)
-    print("TASK 2: T5 PROPOSITION GENERATION")
+    print("TASK 2: PROPOSITION GENERATION")
     print("=" * 60)
     task2_props = submit_task2_t5()
+    if not task2_props:
+        # Fallback to Ollama if T5 unavailable
+        print("\nT5 not available. Trying Ollama fallback...")
+        task2_props = submit_task2_ollama()
     if task2_props:
-        print("\nTask 2 submission complete.")
+        # Write final submission to canonical path
+        prop_path = os.path.join(OUTPUT_DIR, "submit_task2_propositions.json")
+        with open(prop_path, "w") as f:
+            json.dump(task2_props, f, indent=2)
+        gen_count = sum(1 for p in task2_props if p.get("generated_proposition"))
+        print(f"\nTask 2 submission complete ({gen_count}/{len(task2_props)} generated)")
+        print(f"   Saved to {prop_path}")
     else:
         print("\nTask 2: No propositions generated (check errors above).")
 

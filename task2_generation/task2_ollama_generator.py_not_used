@@ -15,6 +15,7 @@ import numpy as np
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
 from core.ollama_integration import OllamaClient, OllamaGenerator
 
 print("="*80)
@@ -39,12 +40,15 @@ available_models = client.get_available_models()
 print(f"✅ Connected to Ollama")
 print(f"   Available models: {', '.join(available_models)}")
 
-if 'mistral' not in available_models:
-    print("\n❌ Mistral not found!")
-    print("   Run: ollama pull mistral")
-    sys.exit(1)
+# Prefer gemma4 or qwen3.6 for generation quality; fall back to mistral
+_GENERATION_MODEL = 'gemma4'
+if _GENERATION_MODEL not in available_models and 'qwen3.6' in available_models:
+    _GENERATION_MODEL = 'qwen3.6'
+elif _GENERATION_MODEL not in available_models and 'mistral' in available_models:
+    _GENERATION_MODEL = 'mistral'
 
-print("✅ Mistral ready\n")
+print(f"✅ Connected to Ollama")
+print(f"   Using model: {_GENERATION_MODEL}")
 
 # ============================================================================
 # LOAD DATA
@@ -62,15 +66,9 @@ except FileNotFoundError:
 
 test_texts = task1_results['test_texts']
 hard_predictions = task1_results['hard_predictions']
-label_names_dict = task1_results['label_names']
 
-# Handle both dict and list formats
-if isinstance(label_names_dict, dict):
-    # It's a dict
-    label_names = [label_names_dict.get(str(i), str(i)) for i in range(len(set(hard_predictions)))]
-else:
-    # It's a list
-    label_names = label_names_dict
+# All label → ID conversions use config (single source of truth)
+label_names = [config.ID_TO_LABEL.get(int(p), config.CLASS_LABELS[2]) for p in hard_predictions]
 
 print(f"✅ Loaded {len(test_texts)} test instances")
 print(f"   Predictions:")
@@ -102,10 +100,10 @@ print("\n" + "="*80)
 print("GENERATION RESULTS")
 print("="*80)
 
-# Count by type
-premise_count = sum(1 for r in results if r['label'] == 'premise')
-conclusion_count = sum(1 for r in results if r['label'] == 'conclusion')
-none_count = sum(1 for r in results if r['label'] == 'none')
+# Count by type (use config labels for consistency)
+premise_count = sum(1 for r in results if r['label'] == config.CLASS_LABELS[0])
+conclusion_count = sum(1 for r in results if r['label'] == config.CLASS_LABELS[1])
+none_count = sum(1 for r in results if r['label'] == config.CLASS_LABELS[2])
 
 generated_propositions = [r for r in results if r['generated_proposition'] is not None]
 generated_count = len(generated_propositions)

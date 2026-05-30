@@ -53,7 +53,7 @@ TRANSFORMER_WARMUP_STEPS = 0
 
 # ============== T5 GENERATION HYPERPARAMETERS ============
 
-T5_MODEL_NAME = "t5-small"
+T5_MODEL_NAME = "google/flan-t5-base"  # better instruction-following than t5-small; train with LoRA on small dataset
 T5_BATCH_SIZE = 16
 T5_MAX_LENGTH = 512
 T5_LEARNING_RATE = 3e-4
@@ -164,3 +164,21 @@ def load_training_data(csv_path=None):
     print(df["label"].value_counts().sort_index().to_string(index=False))
     print()
     return df
+
+
+# ============== TRAIN/TEST SPLIT HELPER ============
+
+
+def get_train_test_indices(n_samples, test_size=1.0 - TRAIN_VAL_SPLIT, random_state=RANDOM_STATE):
+    """Return (train_idx, test_idx) arrays using a random stratified split.
+
+    All scripts should use this function to get identical train/test indices,
+    ensuring fair comparison across classifiers.
+    """
+    from sklearn.model_selection import train_test_split
+    train_idx, test_idx = train_test_split(
+        np.arange(n_samples),
+        test_size=test_size,
+        random_state=random_state,
+    )
+    return np.sort(train_idx), np.sort(test_idx)

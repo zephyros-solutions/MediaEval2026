@@ -1,8 +1,8 @@
 # AGENT_CONTEXT.md - Architecture & Extension Guide
 
 **Audience**: Developers, AI agents, automation tools enhancing this codebase
-**Last Updated**: May 27, 2026
-**Status**: Classification pipeline complete | Submission generated
+**Last Updated**: May 30, 2026
+**Status**: All submission files ready | Last verified May 30, 2026
 
 ---
 
@@ -45,7 +45,7 @@ Runs all classification methods and produces comparison table.
 │  Entry points: Single responsibility per file             │
 ├─────────────────────────────────────────────────────────────┤
 │  Core Modules (core/)                                     │
-│  - ollama_integration.py (Ollama client, URL: localhost:11434)│
+│  - ollama_integration.py (Ollama client, auto-detect URL) │
 │  - common_utils.py (labels, metrics)                      │
 │  - domain_feature_engineering.py (linguistic features)    │
 │  - explore_data.py (data exploration)                     │
@@ -93,8 +93,8 @@ No circular dependencies.
 ### `core/ollama_integration.py`
 
 **Purpose**: Ollama client interface
-**URL**: `http://localhost:11434`
-**Classes**: `OllamaClient(model="mistral")`, `OllamaClassifier`, `OllamaGenerator`
+**URL**: Auto-detected — tries `host.docker.internal:11434` first, falls back to `localhost:11434`
+**Classes**: `OllamaClient`, `OllamaClassifier`, `OllamaGenerator`
 
 ### `core/common_utils.py`
 
@@ -125,10 +125,14 @@ No circular dependencies.
 |------|------|------|------|--|------|
 | `transformer/transformer.py` | DistilBERT features + LR | **0.635** | **0.470** | 0.955 | ~29s |
 | `task1_classifier_tfidf.py` | TF-IDF + RF | 0.432 | 0.277 | 0.815 | ~21s |
+| `new_classifiers.py` | TF-IDF + SVM/XGBoost + SBERT+LR | — | — | — | — |
 | `task1_ollama_classifier.py` | Mistral 7B (Ollama) | 0.419 | 0.060 | 2.250 | ~43min |
 | `task1_ollama_fewshot.py` | Mistral 7B + few-shot | 0.399 | 0.141 | 24.611 | ~55min |
 
 **Winner**: Transformer (DistilBERT feature extraction + Balanced LogisticRegression)
+
+**Final submission ensemble** (weighted soft voting, 5 classifiers):
+- Transformer (0.470) + SBERT+LR (0.306) + TF-IDF+XGBoost (0.302) + TF-IDF+RF (0.277) + TF-IDF+SVM (0.249)
 
 **Note on ensemble scores**: Earlier runs reported ensemble F1 of ~0.99. These were evaluated on training data and are not meaningful benchmarks. The only valid F1 scores are from the held-out 20% test split shown above.
 
@@ -191,22 +195,38 @@ Balanced few-shot examples with multi-round averaging.
 
 ### `task2_generation/` - Generation
 
+Two tested standalone methods + three abandoned prototypes:
+
 | File | Type | Quality | Time |
 |------|------|--|------|
-| `task2_ollama_generator.py` | LLM prompting | High | ~2min |
-| `task2_generator.py` | Templates | Medium | ~10s |
-| `task2_generator_enhanced.py` | T5 fine-tuning | Train: ~5min, Gen: ~30s |
+| `ollama_generator.py` | LLM prompting (gemma4→qwen3.6→mistral) | High | ~2min |
+| `t5_finetune.py` | T5 fine-tuning (flan-t5-base + LoRA) | Train: ~5min, Gen: ~30s |
+| `task2_generator.py_not_used` | Templates | Medium | ~10s |
+| `task2_ollama_generator.py_not_used` | Ollama (mistral only) | High | ~2min |
+| `task2_generator_enhanced.py_not_used` | T5 fine-tuning prototype | Train: ~5min, Gen: ~30s |
+
+**T5 + LoRA**: `google/flan-t5-base` (250M params) fine-tuned with LoRA adapter (r=8, α=16, dropout=0.1 on attention matrices) on 364 training instances. Requires `peft` package. Model saved to `outputs/task2_t5_model/peft_adapter/`.
+
+### Abandoned Core Modules
+
+| File | Reason |
+|---|-|
+| `core/common_utils.py_not_used` | Labels/metrics duplicated in `config.py` — no longer imported |
+| `core/domain_feature_engineering.py_not_used` | 50+ linguistic features never used by any classifier |
+| `core/explore_data.py_not_used` | Data exploration script, not part of production pipeline |
 
 ### `submit.py` - Submission
 
-**`submit_task1()`** — Trains TF-IDF + Transformer on ALL 1333 instances, generates predictions for test set via weighted soft voting (0.28 TF-IDF + 0.47 Transformer).
+**`submit_task1()`** — Trains 5 classifiers on ALL 1333 instances, generates predictions for test set via weighted soft voting ensemble.
+
+**`submit_task2_t5()`** — Generates propositions using flan-t5-base + LoRA. Trains from scratch if no model exists, uses Ollama as alternative (`submit_task2_ollama()`).
 
 **`run_all_and_submit()`** — Master function that runs everything:
-1. All base classifiers via `run_methods.py`'s TASK1_METHODS
+1. All base classifiers via `run_methods.py`'s TASK1_METHODS (5 classifiers)
 2. All 6 ensemble strategies via `task1_ensemble.py`'s METHODS
 3. Compares by F1(3-class) on held-out test split
 4. Selects best method
-5. Generates `submit_task1_test.json` (148 test tweets) + `submit_task1_classifiers.json` (1333 full dataset)
+5. Generates `submit_task1_test.json` (148 test tweets) + `submit_task1_classifiers.json` (1333 full dataset) + `submit_task2_propositions.json`
 
 **CLI**: `python submit.py --run-all`, `--task1`, `--task2 --t5`, `--task2 --ollama`
 
@@ -303,7 +323,7 @@ All classifiers produce `{id, text, label, probabilities, hard_prediction}` for 
 | sbert | 0.4047 | 0.5694 | 34.539 | ~52s |
 | bagging | 0.2838 | 0.4222 | 34.539 | ~48s |
 
-**Key finding**: Voting-based ensembles (soft_voting, weighted_voting, majority_voting) produce identical results because with only 2 base classifiers, there is no diversity to exploit. The ensemble F1(3-class) = 0.4723 matches the Transformer alone (0.470), confirming that ensembles require more diverse base classifiers to improve over standalone approaches.
+**Key finding**: With only 2 base classifiers, voting-based ensembles cannot add diversity. With 5 diverse classifiers in the final submission, weighted voting aggregates complementary strengths across TF-IDF, Transformer, SBERT, and gradient boosting approaches.
 
 ### Cross-Entropy Issues
 
@@ -347,33 +367,40 @@ python -c "import json; p = json.load(open('outputs/predictions_classifiers.json
 ## Roadmap
 
 ### Completed
-- [x] All classifiers implemented and compared
+- [x] All classifiers implemented and compared (5 classifiers: TF-IDF+RF, TF-IDF+SVM, TF-IDF+XGBoost, SBERT+LR, Transformer)
 - [x] Transformer is the best method (0.635 F1 2-class)
 - [x] Unified output format across all methods
 - [x] Cross-platform device handling
+- [x] Cross-platform Ollama URL auto-detection (host.docker.internal → localhost)
 - [x] run_methods.py unified runner
 - [x] Root config.py as single source of truth
 - [x] evaluation/evaluate.py for unified evaluation (Task 1 + Task 2)
-- [x] submit.py for test set submissions
+- [x] submit.py for test set submissions with 5-classifier ensemble
 - [x] run_all_and_submit() master runner
 - [x] Submission files generated
 - [x] Ensemble evaluation on held-out 20% split (fair comparison)
 - [x] All 6 ensemble methods working correctly
 - [x] Base classifier caching in ensemble (no redundant re-runs)
+- [x] Task 2 T5+LoRA fine-tuning with PEFT
+- [x] Task 2 T5+LoRA tested end-to-end: 18/148 generated (17 premise + 1 conclusion)
+- [x] Task 2 Ollama model auto-selection (gemma4 → qwen3.6 → mistral)
+- [x] Config as single source of truth for all label↔ID conversions
+- [x] Task 2 methods consolidated into standalone files (t5_finetune.py, ollama_generator.py)
+- [x] Task 2 output format: `tweet_text` key (consistently across T5 and Ollama)
 
 ### Known Limitations
-- [ ] Only 2 base classifiers available without Ollama (TF-IDF + Transformer)
 - [ ] Voting ensembles cannot improve over Transformer with only 2 classifiers
 - [ ] No CV-on-all-data ensemble selection strategy implemented
 - [ ] High CE (34.54) across all methods indicates probability calibration issues
+- [ ] T5 generation output quality: "You're a liar." — generated propositions are short/fragmentary
+- [ ] `temperature`/`top_p` flags in T5 generate() produce warnings (not valid for flan-t5-base)
 
 ### Future
 - [ ] Proper ensemble selection via CV on all 1333 instances
-- [ ] Add more diverse base classifiers for ensemble
 - [ ] Fix feature_fusion dtype bug
 - [ ] Active learning for data selection
 - [ ] Generation evaluation (BERTScore, human)
-- [ ] T5 fine-tuning with more epochs/larger model
+- [ ] T5 fine-tuning with larger model (T5-3B) or more training data
 
 ---
 
@@ -392,4 +419,4 @@ When adding new approaches or features:
 ---
 
 **Document Purpose**: Enable agents and developers to understand system architecture, design patterns, and how to safely extend functionality
-**Last Verified**: May 27, 2026
+**Last Verified**: May 29, 2026

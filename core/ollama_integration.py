@@ -39,8 +39,24 @@ except ImportError:
 
 class OllamaConfig:
     """Configuration for Ollama integration"""
-    
-    BASE_URL = "http://localhost:11434"
+
+    _BASE_URLS = ("http://host.docker.internal:11434", "http://localhost:11434")
+
+    @staticmethod
+    def _detect():
+        import socket
+        for url in OllamaConfig._BASE_URLS:
+            try:
+                s = socket.create_connection(
+                    url.replace("http://", "").split(":")[:2], timeout=1
+                )
+                s.close()
+                return url
+            except OSError:
+                continue
+        return OllamaConfig._BASE_URLS[-1]
+
+    BASE_URL = None  # set below at module level
     
     # Model recommendations
     MODELS = {
@@ -81,6 +97,9 @@ class OllamaConfig:
 # ============================================================================
 # OLLAMA CLIENT
 # ============================================================================
+
+# Module-level Ollama URL detection
+OllamaConfig.BASE_URL = OllamaConfig._detect()
 
 class OllamaClient:
     """Client for interacting with Ollama"""

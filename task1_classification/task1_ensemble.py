@@ -130,13 +130,12 @@ def _get_cached_base_predictions():
     data = config.load_data()
     df = data["df"]
 
-    # Determine split ONCE - seed before computing
+    # Determine split ONCE - use config helper for consistent indices across all classifiers
     _seeded = getattr(_get_cached_base_predictions, '_seeded', False)
     if not _seeded:
-        np.random.seed(config.RANDOM_STATE)
-        split_idx = int(len(df) * config.TRAIN_VAL_SPLIT)
-        _get_cached_base_predictions._test_indices = np.random.choice(len(df), size=len(df) - split_idx, replace=False)
-        _get_cached_base_predictions._test_ids = set(int(df.iloc[i]["id"]) for i in _get_cached_base_predictions._test_indices)
+        train_idx, test_idx = config.get_train_test_indices(len(df))
+        _get_cached_base_predictions._test_indices = test_idx
+        _get_cached_base_predictions._test_ids = set(int(df.iloc[i]["id"]) for i in test_idx)
         _get_cached_base_predictions._seeded = True
 
     test_indices = _get_cached_base_predictions._test_indices
