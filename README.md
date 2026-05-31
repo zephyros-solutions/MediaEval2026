@@ -119,11 +119,12 @@ python submit.py --run-all
 ```
 
 This calls `submit.run_all_and_submit()` which:
-1. Runs all base classifiers (TF-IDF, Transformer, Ollama methods if available)
-2. Runs all 6 ensemble strategies (soft_voting, weighted_voting, majority_voting, feature_fusion, sbert, bagging)
-3. Compares all results by F1(3-class) on the held-out 20% test split
-4. Selects the best method
-5. Generates submission files (test + full dataset)
+1. Computes ensemble weights dynamically from 5-fold CV on 80% training set (no hardcoded constants)
+2. Runs ALL standalone AND 6 ensemble strategies on the SAME held-out 20% test split
+3. Compares all results by F1(3-class), ranks all methods in one table
+4. Selects the best overall approach (standalone or ensemble)
+5. Trains the winning approach on ALL 1333 instances for final submission
+6. Generates Task 1 + Task 2 submission files
 
 ### Individual Scripts
 
@@ -286,6 +287,18 @@ python submit.py --task2 --ollama # Use Ollama (auto-selects best model)
 python submit.py --task2 --t5    # Train flan-t5-base + LoRA if needed, then generate
 python submit.py --task2 --ollama # Use Ollama (auto-selects best model)
 ```
+
+### Task 2: Method Selection
+
+`task2_generation/eval_generation.py` — evaluates both T5 and Ollama on validation data (80/20 split), computes BLEU + semantic similarity, chooses the better method.
+
+Integrated into `run_all_and_submit()`: automatically runs the comparison and picks the winner before generating propositions.
+
+```bash
+python task2_generation/eval_generation.py
+```
+
+Requires: running Ollama server with generation model (gemma4/qwen3.6/mistral) for Ollama evaluation.
 
 ### Task 2: Abandoned Methods
 

@@ -193,5 +193,10 @@ def get_full_data_predictions():
     return preds
 
 
+# Create output directories once at module load time
+_OUTDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../outputs/fine_tuned_model")
+os.makedirs(_OUTDIR, exist_ok=True)
+
+
 if __name__ == "__main__":
     run_tfidf()

@@ -309,6 +309,10 @@ def _train_from_scratch(data, device):
     return model, tokenizer
 
 
+# Create output directories once at module load time
+os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="T5 + LoRA proposition generation")
     parser.add_argument("--train", action="store_true", help="Train only")

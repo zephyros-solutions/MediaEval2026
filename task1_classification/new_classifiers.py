@@ -26,7 +26,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from evaluation.metrics import compute_metrics
 
-RANDOM_STATE = 42
 OUTPUT_DIR = config.OUTPUT_DIR
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -54,7 +53,7 @@ def run_svm():
     test_texts, test_labels = texts[test_idx], data["majority_labels"][test_idx]
     test_ids = [int(df.iloc[i]["id"]) for i in test_idx]
 
-    base_svm = LinearSVC(dual="auto", max_iter=5000, random_state=RANDOM_STATE)
+    base_svm = LinearSVC(dual="auto", max_iter=5000, random_state=config.RANDOM_STATE)
     pipe = Pipeline([
         ("tfidf", TfidfVectorizer()),
         ("svm", base_svm),
@@ -66,7 +65,7 @@ def run_svm():
         "svm__C": [0.01, 0.1, 1.0, 10.0],
         "svm__class_weight": ["balanced", None],
     }
-    skf = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    skf = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=config.RANDOM_STATE)
 
     grid = GridSearchCV(pipe, param_grid, cv=skf, scoring="f1_macro", n_jobs=-1)
     print("  [SVM] 5-fold CV for TF-IDF + LinearSVC...")
@@ -116,7 +115,7 @@ def run_svm_for_ensemble():
     df = data["df"]
     texts = np.array(data["texts"])
 
-    base_svm = LinearSVC(dual="auto", max_iter=5000, random_state=RANDOM_STATE)
+    base_svm = LinearSVC(dual="auto", max_iter=5000, random_state=config.RANDOM_STATE)
     pipe = Pipeline([
         ("tfidf", TfidfVectorizer(**config.TFIDF_DEFAULTS)),
         ("svm", base_svm),
@@ -179,13 +178,13 @@ def run_xgboost():
         "reg_alpha": [0, 0.1],
         "reg_lambda": [0.5, 1.0],
     }
-    skf = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    skf = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=config.RANDOM_STATE)
 
     # XGBoost needs dense input for GridSearchCV
     X_train_dense = np.array(X_train.toarray())
     X_test_dense = np.array(X_test.toarray())
 
-    clf = xgb.XGBClassifier(use_label_encoder=False, eval_metric="mlogloss", random_state=RANDOM_STATE)
+    clf = xgb.XGBClassifier(eval_metric="mlogloss", random_state=config.RANDOM_STATE)
     grid = GridSearchCV(clf, param_grid, cv=skf, scoring="f1_macro", n_jobs=1)
     print("  [XGB] 5-fold CV for TF-IDF + XGBoost...")
     grid.fit(X_train_dense, train_labels)
@@ -237,8 +236,8 @@ def run_xgboost_for_ensemble():
     base_clf = xgb.XGBClassifier(
         n_estimators=100, max_depth=5, learning_rate=0.1,
         subsample=1.0, colsample_bytree=1.0, reg_alpha=0, reg_lambda=1.0,
-        min_child_weight=1, use_label_encoder=False, eval_metric="mlogloss",
-        random_state=RANDOM_STATE,
+        min_child_weight=1, eval_metric="mlogloss",
+        random_state=config.RANDOM_STATE,
     )
     base_clf.fit(X_dense, data["majority_labels"])
 
@@ -293,9 +292,9 @@ def run_sbert():
         "class_weight": ["balanced", None],
         "max_iter": [1000, 5000],
     }
-    skf = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    skf = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=config.RANDOM_STATE)
 
-    grid = GridSearchCV(LogisticRegression(random_state=RANDOM_STATE), param_grid, cv=skf, scoring="f1_macro", n_jobs=-1)
+    grid = GridSearchCV(LogisticRegression(random_state=config.RANDOM_STATE), param_grid, cv=skf, scoring="f1_macro", n_jobs=-1)
     print("  [SBERT] 5-fold CV for SBERT + LogisticRegression...")
     grid.fit(X_train, train_labels)
     print(f"  [SBERT] Best params: {grid.best_params_}  F1={grid.best_score_:.4f}")
@@ -328,7 +327,7 @@ def run_sbert_for_ensemble():
     print("  [SBERT] Encoding all data...")
     X = model.encode(list(data["texts"]), show_progress_bar=False, normalize_embeddings=True)
 
-    clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=5000, random_state=RANDOM_STATE)
+    clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=5000, random_state=config.RANDOM_STATE)
     clf.fit(X, data["majority_labels"])
 
     all_preds = clf.predict(X)
@@ -416,10 +415,10 @@ def run_cross_encoder():
         "class_weight": ["balanced", None],
         "max_iter": [1000, 5000],
     }
-    skf = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    skf = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=config.RANDOM_STATE)
 
     print("  [CE] 5-fold CV for Cross-encoder + LogisticRegression...")
-    grid = GridSearchCV(LogisticRegression(random_state=RANDOM_STATE), param_grid, cv=skf, scoring="f1_macro", n_jobs=-1)
+    grid = GridSearchCV(LogisticRegression(random_state=config.RANDOM_STATE), param_grid, cv=skf, scoring="f1_macro", n_jobs=-1)
     grid.fit(X_train, train_labels)
     print(f"  [CE] Best params: {grid.best_params_}  F1={grid.best_score_:.4f}")
 
@@ -472,7 +471,7 @@ def run_cross_encoder_for_ensemble():
     print("  [CE] Encoding all data with reranker...")
     X = encode_all(data["texts"])
 
-    clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=5000, random_state=RANDOM_STATE)
+    clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=5000, random_state=config.RANDOM_STATE)
     clf.fit(X, data["majority_labels"])
 
     all_preds = clf.predict(X)

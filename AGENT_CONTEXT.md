@@ -217,16 +217,20 @@ Two tested standalone methods + three abandoned prototypes:
 
 ### `submit.py` - Submission
 
-**`submit_task1()`** — Trains 5 classifiers on ALL 1333 instances, generates predictions for test set via weighted soft voting ensemble.
+**`compute_ensemble_weights()`** — Computes ensemble weights dynamically from 5-fold CV on the 80% training set (replaces hardcoded weights).
+
+**`compare_standalone_vs_ensemble()`** — Runs all standalone AND all 6 ensemble methods on the SAME held-out 20% set, returns ranked results.
+
+**`submit_task1(weights=None)`** — Trains all classifiers on ALL 1333 instances. If `weights` provided uses them for voting; otherwise calls `compute_ensemble_weights()`.
 
 **`submit_task2_t5()`** — Generates propositions using flan-t5-base + LoRA. Trains from scratch if no model exists, uses Ollama as alternative (`submit_task2_ollama()`).
 
 **`run_all_and_submit()`** — Master function that runs everything:
-1. All base classifiers via `run_methods.py`'s TASK1_METHODS (5 classifiers)
-2. All 6 ensemble strategies via `task1_ensemble.py`'s METHODS
-3. Compares by F1(3-class) on held-out test split
-4. Selects best method
-5. Generates `submit_task1_test.json` (148 test tweets) + `submit_task1_classifiers.json` (1333 full dataset) + `submit_task2_propositions.json`
+1. Computes ensemble weights from CV on 80% training set (dynamic, not hardcoded)
+2. Compares ALL standalone + 6 ensemble methods on the SAME held-out 20% set
+3. Selects the best overall approach
+4. Trains the winning approach on ALL 1333 instances for submission
+5. Generates Task 1 + Task 2 submissions
 
 **CLI**: `python submit.py --run-all`, `--task1`, `--task2 --t5`, `--task2 --ollama`
 
@@ -387,6 +391,10 @@ python -c "import json; p = json.load(open('outputs/predictions_classifiers.json
 - [x] Config as single source of truth for all label↔ID conversions
 - [x] Task 2 methods consolidated into standalone files (t5_finetune.py, ollama_generator.py)
 - [x] Task 2 output format: `tweet_text` key (consistently across T5 and Ollama)
+- [x] Task 2 method selection (T5 vs Ollama) integrated into `run_all_and_submit()` via `eval_generation.py`
+- [x] **Ensemble weights computed dynamically from CV (no hardcoded constants)**
+- [x] **Standalone vs ensemble compared on the SAME held-out 20% set**
+- [x] `task2_generation/eval_generation.py` — T5 vs Ollama generation quality evaluation
 
 ### Known Limitations
 - [ ] Voting ensembles cannot improve over Transformer with only 2 classifiers

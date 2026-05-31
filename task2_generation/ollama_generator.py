@@ -119,5 +119,9 @@ def generate_with_ollama():
     return test_propositions
 
 
+# Create output directories once at module load time
+os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+
+
 if __name__ == "__main__":
     generate_with_ollama()
