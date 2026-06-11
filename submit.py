@@ -125,9 +125,9 @@ def compute_ensemble_weights():
     print("\nComputing ensemble weights from 5-fold CV on training set...")
 
     # Import the standalone classifier functions that do proper CV
-    from task1_classification.task1_classifier_tfidf import run_tfidf
-    from task1_classification.transformer.transformer import run_transformer
-    from task1_classification.new_classifiers import run_svm, run_xgboost, run_sbert
+    from task1_classification.task1_classifier_tfidf import run_tfidf, run_tfidf_for_ensemble
+    from task1_classification.transformer.transformer import run_transformer, run_transformer_for_ensemble
+    from task1_classification.new_classifiers import run_svm, run_xgboost, run_sbert, run_svm_for_ensemble, run_xgboost_for_ensemble, run_sbert_for_ensemble
 
     cv_scores = {}
 
@@ -337,26 +337,26 @@ def submit_task1(weights=None):
         print(f"\n{i}/5 Training {clf_name} on full data...")
         try:
             if clf_name == "tfidf_rf":
-                preds, rep, art = train_and_predict_tfidf_for_ensemble()
+                preds, rep, art = run_tfidf_for_ensemble()
                 f1 = rep.get("cv_scores", {}).get("macro_f1_3class")
                 available[clf_name] = ("tfidf", art)
             elif clf_name == "transformer":
-                preds, rep, art = train_and_predict_transformer_for_ensemble()
+                preds, rep, art = run_transformer_for_ensemble()
                 f1 = rep.get("cv_scores", {}).get("macro_f1_3class")
                 available[clf_name] = ("transformer", art)
             elif clf_name == "tfidf_svm":
-                preds, rep, art = train_and_predict_svm_for_ensemble()
+                preds, rep, art = run_svm_for_ensemble()
                 f1 = rep.get("cv_scores", {}).get("macro_f1_3class")
                 available[clf_name] = ("svm", art)
             elif clf_name == "tfidf_xgb":
-                preds, rep, art = train_and_predict_xgboost_for_ensemble()
+                preds, rep, art = run_xgboost_for_ensemble()
                 if preds is None:
                     print("   [XGBoost] unavailable, skipping")
                     continue
                 f1 = rep.get("cv_scores", {}).get("macro_f1_3class")
                 available[clf_name] = ("xgb", art)
             elif clf_name == "sbert_lr":
-                preds, rep, art = train_and_predict_sbert_for_ensemble()
+                preds, rep, art = run_sbert_for_ensemble()
                 f1 = rep.get("cv_scores", {}).get("macro_f1_3class")
                 available[clf_name] = ("sbert", art)
             else:
@@ -533,54 +533,6 @@ def _submit_standalone_on_all_data(method_name):
     return test_submission, full_submission
 
 
-def train_and_predict_tfidf():
-    """Import TF-IDF + RF predictions from task1_classifier_tfidf on ALL data."""
-    from task1_classification.task1_classifier_tfidf import get_full_data_predictions
-    return get_full_data_predictions(), "tfidf"
-
-
-def train_and_predict_transformer():
-    """Import DistilBERT + LR predictions from transformer.py on ALL data."""
-    from task1_classification.transformer.transformer import get_full_data_predictions
-    return get_full_data_predictions(), "transformer"
-
-
-def train_and_predict_tfidf_for_ensemble():
-    """Train TF-IDF + RF on ALL data, return (predictions, report, artifacts)."""
-    from task1_classification.task1_classifier_tfidf import run_tfidf_for_ensemble
-    preds, rep, art = run_tfidf_for_ensemble()
-    return preds, rep, art
-
-
-def train_and_predict_transformer_for_ensemble():
-    """Train DistilBERT + LR on ALL data, return (predictions, report, artifacts)."""
-    from task1_classification.transformer.transformer import run_transformer_for_ensemble
-    preds, rep, art = run_transformer_for_ensemble()
-    return preds, rep, art
-
-
-def train_and_predict_svm_for_ensemble():
-    """Train TF-IDF + LinearSVC on ALL data."""
-    from task1_classification.new_classifiers import run_svm_for_ensemble
-    preds, rep, art = run_svm_for_ensemble()
-    return preds, rep, art
-
-
-def train_and_predict_xgboost_for_ensemble():
-    """Train TF-IDF + XGBoost on ALL data."""
-    from task1_classification.new_classifiers import run_xgboost_for_ensemble
-    preds, rep, art = run_xgboost_for_ensemble()
-    if art is None or art.get("classifier") is None:
-        return None, None, None
-    return preds, rep, art
-
-
-def train_and_predict_sbert_for_ensemble():
-    """Train SBERT + LR on ALL data."""
-    from task1_classification.new_classifiers import run_sbert_for_ensemble
-    preds, rep, art = run_sbert_for_ensemble()
-    return preds, rep, art
-
 
 # ============== TASK 2: PROPOSITION GENERATION SUBMISSION ==============
 
@@ -617,7 +569,7 @@ def run_all_and_submit():
     Returns:
         (best_method_name, best_metrics_dict, test_submission, full_submission)
     """
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 
     # ---- Step 1: Compute ensemble weights ----
     weights = compute_ensemble_weights()

@@ -351,146 +351,10 @@ def run_sbert_for_ensemble():
 # 4. Cross-encoder (reranker) + LogisticRegression
 # ============================================================
 
-def run_cross_encoder():
-    """Standalone: Cross-encoder reranker scores + LogisticRegression."""
-    from cross_encoder import CrossEncoder
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.pipeline import Pipeline
-    from sklearn.preprocessing import StandardScaler
-
-    data = config.load_data()
-    df = data["df"]
-    texts = np.array(data["texts"])
-
-    train_idx, test_idx = config.get_train_test_indices(len(df))
-    train_texts, train_labels = texts[train_idx], data["majority_labels"][train_idx]
-    test_texts, test_labels = texts[test_idx], data["majority_labels"][test_idx]
-    test_ids = [int(df.iloc[i]["id"]) for i in test_idx]
-
-    class_descriptions = {
-        0: "This tweet contains an unstated premise — a hidden assumption that supports the argument.",
-        1: "This tweet contains an unstated conclusion — a logical outcome not explicitly stated.",
-        2: "This tweet has a fully explicit argument with no missing premises or conclusions.",
-    }
-
-    print("  [CE] Loading cross-encoder reranker-MiniLM-v5...")
-    ce = CrossEncoder("cross-encoder/reranker-MiniLM-L-6-v2")
-
-    def encode_with_ce(texts_list, descriptions_dict):
-        """Score each text against each class description, return feature matrix."""
-        features = []
-        for t in texts_list:
-            scores = []
-            for c in range(3):
-                raw_scores = ce.predict([(t, descriptions_dict[c])])
-                # Use raw score + unigram features as additional signal
-                unigram = [float(w in set(t.lower().split())) for w in ["because", "so", "therefore", "thus", "hence", "implies", "means"]]
-                scores.extend([raw_scores[0]] + unigram)
-            features.append(scores)
-        return np.array(features)
-
-    # Actually score each (text, class) pair properly
-    def encode_with_ce_v2(texts_list, descriptions_dict):
-        pairs = []
-        for t in texts_list:
-            for c in range(3):
-                pairs.append((t, descriptions_dict[c]))
-        scores = ce.predict(pairs, show_progress_bar=False)
-        # Reshape: len(texts) x 3
-        scores = scores.reshape(len(texts_list), 3)
-        # Add unigram features
-        unigram_features = np.array([
-            [float(w in set(t.lower().split())) for w in ["because", "so", "therefore", "thus", "hence", "implies", "means"]]
-            for t in texts_list
-        ])
-        return np.hstack([scores, unigram_features])
-
-    print("  [CE] Encoding train with reranker...")
-    X_train = encode_with_ce_v2(list(train_texts), class_descriptions)
-    print("  [CE] Encoding test with reranker...")
-    X_test = encode_with_ce_v2(list(test_texts), class_descriptions)
-
-    param_grid = {
-        "C": [0.01, 0.1, 1.0, 10.0],
-        "class_weight": ["balanced", None],
-        "max_iter": [1000, 5000],
-    }
-    skf = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=config.RANDOM_STATE)
-
-    print("  [CE] 5-fold CV for Cross-encoder + LogisticRegression...")
-    grid = GridSearchCV(LogisticRegression(random_state=config.RANDOM_STATE), param_grid, cv=skf, scoring="f1_macro", n_jobs=-1)
-    grid.fit(X_train, train_labels)
-    print(f"  [CE] Best params: {grid.best_params_}  F1={grid.best_score_:.4f}")
-
-    y_pred = grid.best_estimator_.predict(X_test)
-    y_proba = grid.best_estimator_.predict_proba(X_test)
-
-    predictions, prob_dicts = __build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx)
-    metrics, per_class = compute_metrics(test_labels, y_pred, prob_dicts, [data["ann_labels"][i] for i in test_idx], "cross_encoder_lr")
-
-    report = {
-        "method": "cross_encoder_lr",
-        "best_cv_params": grid.best_params_,
-        "best_cv_f1": float(grid.best_score_),
-        "test_metrics": {k: float(v) for k, v in metrics.items() if k not in ("per_class", "method")},
-        "per_class": per_class,
-        "prediction_distribution": {config.CLASS_LABELS[j]: int(np.sum(y_pred == j)) for j in range(3)},
-    }
-    return predictions, report
-
-
-def run_cross_encoder_for_ensemble():
-    """Train Cross-encoder + LogisticRegression on ALL data."""
-    from cross_encoder import CrossEncoder
-    from sklearn.linear_model import LogisticRegression
-
-    data = config.load_data()
-    df = data["df"]
-
-    class_descriptions = {
-        0: "This tweet contains an unstated premise — a hidden assumption that supports the argument.",
-        1: "This tweet contains an unstated conclusion — a logical outcome not explicitly stated.",
-        2: "This tweet has a fully explicit argument with no missing premises or conclusions.",
-    }
-
-    ce = CrossEncoder("cross-encoder/reranker-MiniLM-L-6-v2")
-
-    def encode_all(texts_list):
-        pairs = []
-        for t in texts_list:
-            for c in range(3):
-                pairs.append((t, class_descriptions[c]))
-        scores = ce.predict(pairs, show_progress_bar=False)
-        scores = scores.reshape(len(texts_list), 3)
-        unigram_features = np.array([
-            [float(w in set(t.lower().split())) for w in ["because", "so", "therefore", "thus", "hence", "implies", "means"]]
-            for t in texts_list
-        ])
-        return np.hstack([scores, unigram_features])
-
-    print("  [CE] Encoding all data with reranker...")
-    X = encode_all(data["texts"])
-
-    clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=5000, random_state=config.RANDOM_STATE)
-    clf.fit(X, data["majority_labels"])
-
-    all_preds = clf.predict(X)
-    all_proba = clf.predict_proba(X)
-
-    predictions = []
-    for i in range(len(data["texts"])):
-        probs = {config.CLASS_LABELS[j]: float(all_proba[i][j]) for j in range(3)}
-        predictions.append({
-            "id": int(df.iloc[i]["id"]), "text": data["texts"][i],
-            "label": config.ID_TO_LABEL[int(all_preds[i])],
-            "probabilities": probs, "hard_prediction": int(all_preds[i]),
-        })
-
-    artifacts = {"encoder": ce, "classifier": clf, "labels": data["majority_labels"]}
-    return predictions, {"method": "cross_encoder_lr_full"}, artifacts
-
 
 # ============================================================
+# Helpers
+# ============================================================# ============================================================
 # Helpers
 # ============================================================
 
@@ -523,7 +387,6 @@ CLASSES_FULL = {
     "svm": run_svm_for_ensemble,
     "xgboost": run_xgboost_for_ensemble,
     "sbert": run_sbert_for_ensemble,
-    "cross_encoder": run_cross_encoder_for_ensemble,
 }
 
 

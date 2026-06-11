@@ -57,7 +57,7 @@ from task1_classification.task1_classifier_tfidf import run_tfidf
 from task1_classification.transformer.transformer import run_transformer
 from task1_classification.new_classifiers import (
     run_svm_for_ensemble, run_xgboost_for_ensemble,
-    run_sbert_for_ensemble, run_cross_encoder_for_ensemble,
+    run_sbert_for_ensemble,
 )
 
 OUTPUT_DIR = config.OUTPUT_DIR
@@ -175,14 +175,6 @@ def _get_cached_base_predictions():
         base_preds["sbert_lr"] = {p["id"]: {"hard": p["hard_prediction"], "probs": p["probabilities"]} for p in sbert_preds} if sbert_preds else {}
     except Exception as e:
         print(f"    SBERT failed: {e}")
-
-    # 6. Cross-encoder (may fail if model unavailable)
-    print("  [6/6] Cross-encoder...")
-    try:
-        ce_preds, _, _ = run_cross_encoder_for_ensemble()
-        base_preds["cross_encoder"] = {p["id"]: {"hard": p["hard_prediction"], "probs": p["probabilities"]} for p in ce_preds} if ce_preds else {}
-    except Exception as e:
-        print(f"    Cross-encoder failed: {e}")
 
     return base_preds, test_ids, test_indices
 

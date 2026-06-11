@@ -3,7 +3,7 @@ Task 1: TF-IDF + Random Forest Classification with Soft Labels
 
 Approach:
   1. Load annotations from shared config
-  2. 5-fold stratified CV for model selection
+  2. {config.CV_N_FOLDS}-fold stratified CV for model selection
   3. Final model on full train+val with soft-label sample weights
   4. Probability vectors for challenge submission
 
@@ -54,7 +54,7 @@ def _run_pipeline(use_full_data=False):
 
     Args:
         use_full_data: If True, train on ALL annotated data (for ensemble).
-                       If False (default), train on 80% and evaluate on 20%.
+                       If False (default), train on 100% - config.TRAIN_VAL_SPLIT% and evaluate on config.TRAIN_VAL_SPLIT%.
 
     Returns:
         (predictions, report, artifacts|None)
@@ -84,7 +84,7 @@ def _run_pipeline(use_full_data=False):
 
     sw = _make_soft_weights(train_df, majority_labels, ann_labels)
 
-    print("Phase 1: 5-fold CV for hyperparameter tuning...")
+    print(f"Phase 1: {config.CV_N_FOLDS}-fold CV for hyperparameter tuning...")
     param_grid = config.RF_DEFAULTS
     cv = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=config.RANDOM_STATE)
     grid_search = GridSearchCV(
@@ -187,7 +187,7 @@ def get_full_data_predictions():
     """Train TF-IDF + RF on ALL annotated data using CV-selected best params.
 
     Returns predictions in challenge submission format (no report).
-    Uses grid_search.best_params_ from 5-fold CV, not arbitrary values.
+    Uses grid_search.best_params_ from config.CV_N_FOLDS-fold CV, not arbitrary values.
     """
     preds, _, _ = _run_pipeline(use_full_data=True)
     return preds

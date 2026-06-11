@@ -87,13 +87,13 @@ def extract_features(model, tokenizer, texts, device, batch_size=64):
     return np.vstack(embeddings)
 
 
-# -- 5-fold CV --
+# -- CV_N_FOLDS-fold CV --
 
 def run_cv(X, y, texts):
-    """Run 5-fold stratified CV on *already normalized* features and return (mean_f1, std_f1, per_fold_f1, best_clf).
+    """Run CV_N_FOLDS-fold stratified CV on *already normalized* features and return (mean_f1, std_f1, per_fold_f1, best_clf).
 
     Uses the *same* classifier definitions as `_build_classifier`. Selects the classifier with the highest mean validation F1.
-    Returns the *fitted* best classifier so the caller can use it directly.
+
     """
     # All classifiers already receive normalized data (from run_transformer)
     skf = StratifiedKFold(n_splits=CV_N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
@@ -163,16 +163,14 @@ def _build_classifier(name, class_weight=None):
         class_weight: Override class_weight (e.g. fold_weights dict). If None, uses defaults.
     """
     if name == "lr_balanced":
-        cw = class_weight if class_weight is not None else "balanced"
-        return make_pipeline(LogisticRegression(class_weight=cw, max_iter=1000, random_state=RANDOM_STATE, C=1.0))
+        return make_pipeline(LogisticRegression(class_weight="balanced", max_iter=1000, random_state=RANDOM_STATE, C=1.0))
     if name == "lr_weighted":
         cw = class_weight if class_weight is not None else "balanced"
         return make_pipeline(LogisticRegression(class_weight=cw, max_iter=1000, random_state=RANDOM_STATE, C=1.0))
     if name == "sgd_log_balanced":
-        cw = class_weight if class_weight is not None else "balanced"
-        return make_pipeline(SGDClassifier(loss="log_loss", class_weight=cw, max_iter=1000, random_state=RANDOM_STATE, tol=1e-3))
+        return make_pipeline(SGDClassifier(loss="log_loss", class_weight="balanced", max_iter=1000, random_state=RANDOM_STATE, tol=1e-3))
     if name == "sgd_log_weighted":
-        cw = class_weight if class_weight is not None else {"balanced": None}
+        cw = class_weight if class_weight is not None else "balanced"
         return make_pipeline(SGDClassifier(loss="log_loss", class_weight=cw, max_iter=1000, random_state=RANDOM_STATE, tol=1e-3))
     # Fallback
     cw = class_weight if class_weight is not None else "balanced"
@@ -221,9 +219,9 @@ def _run_transformer_pipeline(device_arg=None, save_model=False):
     y_all = df["label"].values
     print(f"Feature shape: {X_all.shape}")
 
-    # 5-fold CV to pick best classifier
+    # CV_N_FOLDS-fold CV to pick best classifier
     print("\n" + "=" * 80)
-    print("5-FOLD STRATIFIED CROSS-VALIDATION")
+    print(f"{CV_N_FOLDS}-FOLD STRATIFIED CROSS-VALIDATION")
     print("=" * 80)
     X_all_norm = normalize(X_all, norm='l2')
     mean_f1, std_f1, cv_f1_scores, best_name, _, _ = run_cv(X_all_norm, y_all, df["text"])
@@ -399,7 +397,7 @@ def get_full_data_predictions():
     """Train DistilBERT + CV-selected classifier on ALL data.
 
     Returns predictions in challenge submission format (no report).
-    Uses the exact classifier selected by 5-fold CV.
+    Uses the exact classifier selected by {CV_N_FOLDS}-fold CV.
     """
     preds, _, _ = run_transformer_for_ensemble()
     return preds

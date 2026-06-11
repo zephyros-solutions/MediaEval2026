@@ -1,0 +1,31 @@
+========================================
+
+Task 1A — binary (none vs. enthymeme)
+----------------------------------------
+
+Run 1
+  Class            Prec    Rec     F1   Sup
+  none           0.6691 0.9588 0.7881    97
+  enthymeme      0.5556 0.0980 0.1667    51
+  macro avg           —      — 0.4774     —
+  Accuracy: 0.6622  CE: 0.6539  Brier: 0.3104
+
+Task 1B — 3-class (none / premise / conclusion)
+----------------------------------------
+
+Run 1
+  Class            Prec    Rec     F1   Sup
+  none           0.6691 0.9588 0.7881    97
+  premise        0.6250 0.1111 0.1887    45
+  conclusion     0.0000 0.0000 0.0000     6
+  macro avg           —      — 0.3256     —
+  Accuracy: 0.6622  CE: 0.8226  Brier: 0.3123
+
+Task 2 — proposition generation (ROSCOE-SS)
+----------------------------------------
+
+Run 1
+  Matched only (n=5): 0.8641
+  With zeros   (n=54): 0.0800
+
+The generation component was evaluated using ROSCOE-SS (facebook/roscoe-512-roberta-base), a reasoning-oriented semantic similarity metric. For each generated proposition, we compute the cosine similarity against all available annotator reconstructions for the corresponding tweet (up to three), scale the scores to the [0, 1] range using the formula (1 + cos) / 2, and take the mean across references as the final per-sample score. We report two metrics: matched-only, which averages scores only over tweets for which both a system generation and a gold reference are available, and with zeros, which assigns a score of 0 to cases where a gold reference exists but no generation was produced, or where a generation was produced for a tweet without a gold reference.
