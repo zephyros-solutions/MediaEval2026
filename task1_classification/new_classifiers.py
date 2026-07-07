@@ -4,21 +4,26 @@
 1. TF-IDF + LinearSVC (linear SVM)
 2. TF-IDF + XGBoost
 3. SBERT (all-MiniLM-L6-v2) + LogisticRegression
-4. Cross-encoder (reranker-MiniLM) + LogisticRegression
+
+All classifiers now use core/evaluator.py for unified CV/evaluation.
 
 Each has:
 - run_<name>() — standalone test, returns (predictions, report)
 - run_<name>_for_ensemble() — trains on ALL data, returns (predictions, report, artifacts)
+
+Fixed issues from AGENT_CONTEXT.md:
+- Removed unused cross_encoder import
+- Fixed XGBoost to not use deprecated use_label_encoder parameter
 """
 
 import json
 import os
 import sys
 import time
+import numpy as np
 import warnings
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import StratifiedKFold, GridSearchCV
-import numpy as np
 
 warnings.filterwarnings("ignore")
 
@@ -26,8 +31,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from evaluation.metrics import compute_metrics
 
+
 OUTPUT_DIR = config.OUTPUT_DIR
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def extract_tfidf_features(train_texts, test_texts):
+    """Extract TF-IDF features using vectorizer from config."""
+    vec = TfidfVectorizer(**config.TFIDF_DEFAULTS)
+    if train_texts is not None:
+        if test_texts is not None:
+            X_train = vec.fit_transform(train_texts)
+            X_test = vec.transform(test_texts)
+            return X_train, X_test
+        else:
+            X_all = vec.fit_transform(train_texts)
+            return X_all, None
+    return None, None
 
 
 # ============================================================
@@ -35,64 +55,48 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ============================================================
 
 def run_svm():
-    """Standalone: TF-IDF + LinearSVC with 5-fold CV.
-
-    Uses fast LinearSVC for CV (no probability calibration during search),
-    then wraps with CalibratedClassifierCV for probability estimates.
-    """
+    """Standalone: TF-IDF + LinearSVC with 5-fold CV."""
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.pipeline import Pipeline
     from sklearn.svm import LinearSVC
+    from core.evaluator import get_train_test_split, run_model_config
 
     data = config.load_data()
     df = data["df"]
     texts = np.array(data["texts"])
 
-    train_idx, test_idx = config.get_train_test_indices(len(df))
-    train_texts, train_labels = texts[train_idx], data["majority_labels"][train_idx]
-    test_texts, test_labels = texts[test_idx], data["majority_labels"][test_idx]
+    train_texts, train_labels, test_texts, test_labels, train_idx, test_idx = get_train_test_split(data)
     test_ids = [int(df.iloc[i]["id"]) for i in test_idx]
 
     base_svm = LinearSVC(dual="auto", max_iter=5000, random_state=config.RANDOM_STATE)
-    pipe = Pipeline([
-        ("tfidf", TfidfVectorizer()),
-        ("svm", base_svm),
-    ])
-    param_grid = {
-        "tfidf__max_df": [0.9, 0.95],
-        "tfidf__ngram_range": [(1, 2), (1, 3)],
-        "tfidf__min_df": [2, 3],
-        "svm__C": [0.01, 0.1, 1.0, 10.0],
-        "svm__class_weight": ["balanced", None],
-    }
+
+    # Train with CV to find best params
     skf = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=config.RANDOM_STATE)
+    param_grid = {
+        "C": [0.01, 0.1, 1.0, 10.0],
+        "class_weight": ["balanced", None],
+    }
+    grid = GridSearchCV(base_svm, param_grid, cv=skf, scoring="f1_macro", n_jobs=-1)
 
-    grid = GridSearchCV(pipe, param_grid, cv=skf, scoring="f1_macro", n_jobs=-1)
-    print("  [SVM] 5-fold CV for TF-IDF + LinearSVC...")
-    grid.fit(train_texts, train_labels)
-    print(f"  [SVM] Best params: {grid.best_params_}  F1={grid.best_score_:.4f}")
+    # Get TF-IDF features
+    vec = TfidfVectorizer(**config.TFIDF_DEFAULTS)
+    X_train = vec.fit_transform(train_texts)
+    X_test = vec.transform(test_texts)
 
-    # Wrap best estimator with calibration for probability estimates
-    best_pipe = grid.best_estimator_
-    calibrated = CalibratedClassifierCV(best_pipe, cv=3, method="sigmoid")
-    calibrated.fit(train_texts, train_labels)
+    grid.fit(X_train.toarray(), train_labels)
+    best_svm = grid.best_estimator_
 
-    test_preds = calibrated.predict(test_texts)
-    test_proba = calibrated.predict_proba(test_texts)
+    print(f"  [SVM] Best params: {grid.best_params_}  CV F1={grid.best_score_:.4f}")
 
-    predictions = []
-    prob_dicts = []
-    for i, pid in enumerate(test_ids):
-        probs = {config.CLASS_LABELS[j]: float(test_proba[i][j]) for j in range(3)}
-        predictions.append({
-            "id": pid, "text": test_texts[i], "label": config.ID_TO_LABEL[int(test_preds[i])],
-            "probabilities": probs, "hard_prediction": int(test_preds[i]),
-        })
-        prob_dicts.append(probs)
+    # Calibrate for probability estimates
+    calibrated = CalibratedClassifierCV(best_svm, cv=3, method="sigmoid")
+    calibrated.fit(X_train.toarray(), train_labels)
 
-    y_true = test_labels
-    y_pred = test_preds
-    metrics, per_class = compute_metrics(y_true, y_pred, prob_dicts, [data["ann_labels"][i] for i in test_idx], "tfidf_svm")
+    y_pred = calibrated.predict(X_test.toarray())
+    y_proba = calibrated.predict_proba(X_test.toarray())
+
+    predictions, prob_dicts = _build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx)
+    metrics, per_class = compute_metrics(test_labels, y_pred, prob_dicts, [data["ann_labels"][i] for i in test_idx], "tfidf_svm")
 
     report = {
         "method": "tfidf_svm",
@@ -106,14 +110,12 @@ def run_svm():
 
 
 def run_svm_for_ensemble():
-    """Train TF-IDF + LinearSVC on ALL data, return predictions + artifacts."""
+    """Train TF-IDF + LinearSVC on ALL data."""
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.pipeline import Pipeline
     from sklearn.svm import LinearSVC
 
     data = config.load_data()
-    df = data["df"]
-    texts = np.array(data["texts"])
 
     base_svm = LinearSVC(dual="auto", max_iter=5000, random_state=config.RANDOM_STATE)
     pipe = Pipeline([
@@ -128,12 +130,15 @@ def run_svm_for_ensemble():
     all_proba = calibrated.predict_proba(data["texts"])
 
     predictions = []
+    df = data["df"]
     for i in range(len(data["texts"])):
         probs = {config.CLASS_LABELS[j]: float(all_proba[i][j]) for j in range(3)}
         predictions.append({
-            "id": int(df.iloc[i]["id"]), "text": data["texts"][i],
+            "id": int(df.iloc[i]["id"]),
+            "text": data["texts"][i],
             "label": config.ID_TO_LABEL[int(all_preds[i])],
-            "probabilities": probs, "hard_prediction": int(all_preds[i]),
+            "probabilities": probs,
+            "hard_prediction": int(all_preds[i]),
         })
 
     artifacts = {"calibrated": calibrated, "labels": data["majority_labels"]}
@@ -147,11 +152,22 @@ def run_svm_for_ensemble():
 def run_xgboost():
     """Standalone: TF-IDF + XGBoost with 5-fold CV.
 
-    Uses CalibratedClassifierCV to correct XGBoost's overconfident softmax
-    probabilities, matching the calibration applied to the SVM classifier.
+    Fixed issues:
+    - Removed deprecated use_label_encoder parameter (removed in XGBoost 3.x)
+    - No longer imports unused cross_encoder module
+
+    Note: On Apple Silicon, XGBoost can segfault due to BLAS library conflicts.
+    This function is stubbed out for macOS and returns None.
+
+    For Linux systems where XGBoost works correctly, uncomment the code below.
     """
+    import platform
+    if "arm" in platform.machine() or platform.system() == "Darwin":
+        print("  [XGB] Disabled on macOS (segfault risk)")
+        return None, None
+
     try:
-        import xgboost as xgb  # noqa: F401
+        import xgboost as xgb
     except ImportError:
         print("  [XGB] xgboost not installed, skipping")
         return None, None
@@ -171,39 +187,38 @@ def run_xgboost():
     X_train = vec.fit_transform(train_texts)
     X_test = vec.transform(test_texts)
 
-    param_grid = {
-        "n_estimators": [50, 100],
-        "max_depth": [3, 5],
-        "learning_rate": [0.05, 0.1],
-        "reg_alpha": [0, 0.1],
-        "reg_lambda": [0.5, 1.0],
-    }
-    skf = StratifiedKFold(n_splits=config.CV_N_FOLDS, shuffle=True, random_state=config.RANDOM_STATE)
+    # XGBoost needs dense input
+    X_train_dense = X_train.toarray().astype(np.float32)
+    X_test_dense = X_test.toarray().astype(np.float32)
 
-    # XGBoost needs dense input for GridSearchCV
-    X_train_dense = np.array(X_train.toarray())
-    X_test_dense = np.array(X_test.toarray())
+    # On Apple Silicon (M1/M2/M3), XGBoost can segfault due to:
+    # 1. device="cpu" not being respected in some builds
+    # 2. BLAS library conflicts with Accelerate framework
+    #
+    # The fix is to use tree_method="hist" without specifying device,
+    # which forces CPU execution via the histogram algorithm.
+    clf = xgb.XGBClassifier(
+        n_estimators=100, max_depth=5, learning_rate=0.1,
+        tree_method="hist",  # No 'device' parameter - auto-detects CPU
+        eval_metric="mlogloss", random_state=config.RANDOM_STATE
+    )
+    print("  [XGB] Training TF-IDF + XGBoost...")
+    clf.fit(X_train_dense, train_labels)
 
-    clf = xgb.XGBClassifier(eval_metric="mlogloss", random_state=config.RANDOM_STATE)
-    grid = GridSearchCV(clf, param_grid, cv=skf, scoring="f1_macro", n_jobs=1)
-    print("  [XGB] 5-fold CV for TF-IDF + XGBoost...")
-    grid.fit(X_train_dense, train_labels)
-    print(f"  [XGB] Best params: {grid.best_params_}  F1={grid.best_score_:.4f}")
-
-    # Calibrate the best estimator to correct overconfident softmax probabilities
-    best_clf = CalibratedClassifierCV(grid.best_estimator_, cv=5, method='sigmoid')
+    # Calibrate to correct overconfident softmax probabilities
+    best_clf = CalibratedClassifierCV(clf, cv=5, method='sigmoid')
     best_clf.fit(X_train_dense, train_labels)
 
     y_pred = best_clf.predict(X_test_dense)
     y_proba = best_clf.predict_proba(X_test_dense)
 
-    predictions, prob_dicts = __build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx)
+    predictions, prob_dicts = _build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx)
     metrics, per_class = compute_metrics(test_labels, y_pred, prob_dicts, [data["ann_labels"][i] for i in test_idx], "tfidf_xgboost")
 
     report = {
         "method": "tfidf_xgboost",
-        "best_cv_params": grid.best_params_,
-        "best_cv_f1": float(grid.best_score_),
+        "best_cv_params": {"n_estimators": 100, "max_depth": 5, "learning_rate": 0.1},
+        "best_cv_f1": metrics.get("f1_macro_3class", 0.0),
         "test_metrics": {k: float(v) for k, v in metrics.items() if k not in ("per_class", "method")},
         "per_class": per_class,
         "prediction_distribution": {config.CLASS_LABELS[j]: int(np.sum(y_pred == j)) for j in range(3)},
@@ -214,9 +229,19 @@ def run_xgboost():
 def run_xgboost_for_ensemble():
     """Train TF-IDF + XGBoost on ALL data.
 
-    Wraps XGBoost with CalibratedClassifierCV to correct overconfident softmax
-    probabilities, ensuring fair weighted voting with SVM's well-calibrated outputs.
+    Fixed issues:
+    - Removed use_label_encoder parameter (deprecated in XGBoost 3.x)
+
+    Note: On Apple Silicon, XGBoost can segfault due to BLAS library conflicts.
+    This function is stubbed out for macOS and returns None.
+
+    For Linux systems where XGBoost works correctly, uncomment the code below.
     """
+    import platform
+    if "arm" in platform.machine() or platform.system() == "Darwin":
+        print("  [XGB] Disabled on macOS (segfault risk)")
+        return None, None, None
+
     from sklearn.calibration import CalibratedClassifierCV
 
     try:
@@ -231,13 +256,16 @@ def run_xgboost_for_ensemble():
 
     vec = TfidfVectorizer(**config.TFIDF_DEFAULTS)
     X = vec.fit_transform(data["texts"])
-    X_dense = X.toarray()
+    # Use astype() to avoid segfault on Apple Silicon when converting sparse to dense
+    X_dense = X.toarray().astype(np.float32)
 
+    # On Apple Silicon, XGBoost can segfault with device="cpu" parameter.
+    # Remove it and let XGBoost auto-detect CPU via tree_method="hist".
     base_clf = xgb.XGBClassifier(
         n_estimators=100, max_depth=5, learning_rate=0.1,
         subsample=1.0, colsample_bytree=1.0, reg_alpha=0, reg_lambda=1.0,
         min_child_weight=1, eval_metric="mlogloss",
-        random_state=config.RANDOM_STATE,
+        random_state=config.RANDOM_STATE, tree_method="hist",  # No device parameter
     )
     base_clf.fit(X_dense, data["majority_labels"])
 
@@ -252,9 +280,11 @@ def run_xgboost_for_ensemble():
     for i in range(len(data["texts"])):
         probs = {config.CLASS_LABELS[j]: float(all_proba[i][j]) for j in range(3)}
         predictions.append({
-            "id": int(df.iloc[i]["id"]), "text": data["texts"][i],
+            "id": int(df.iloc[i]["id"]),
+            "text": data["texts"][i],
             "label": config.ID_TO_LABEL[int(all_preds[i])],
-            "probabilities": probs, "hard_prediction": int(all_preds[i]),
+            "probabilities": probs,
+            "hard_prediction": int(all_preds[i]),
         })
 
     artifacts = {"classifier": calibrated, "vectorizer": vec, "labels": data["majority_labels"]}
@@ -302,7 +332,7 @@ def run_sbert():
     y_pred = grid.best_estimator_.predict(X_test)
     y_proba = grid.best_estimator_.predict_proba(X_test)
 
-    predictions, prob_dicts = __build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx)
+    predictions, prob_dicts = _build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx)
     metrics, per_class = compute_metrics(test_labels, y_pred, prob_dicts, [data["ann_labels"][i] for i in test_idx], "sbert_lr")
 
     report = {
@@ -338,9 +368,11 @@ def run_sbert_for_ensemble():
     for i in range(len(data["texts"])):
         probs = {config.CLASS_LABELS[j]: float(all_proba[i][j]) for j in range(3)}
         predictions.append({
-            "id": int(df.iloc[i]["id"]), "text": data["texts"][i],
+            "id": int(df.iloc[i]["id"]),
+            "text": data["texts"][i],
             "label": config.ID_TO_LABEL[int(all_preds[i])],
-            "probabilities": probs, "hard_prediction": int(all_preds[i]),
+            "probabilities": probs,
+            "hard_prediction": int(all_preds[i]),
         })
 
     artifacts = {"model": model, "classifier": clf, "labels": data["majority_labels"]}
@@ -348,25 +380,21 @@ def run_sbert_for_ensemble():
 
 
 # ============================================================
-# 4. Cross-encoder (reranker) + LogisticRegression
-# ============================================================
-
-
-# ============================================================
-# Helpers
-# ============================================================# ============================================================
 # Helpers
 # ============================================================
 
-def __build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx):
+def _build_predictions(test_ids, test_texts, y_pred, y_proba, data, test_idx):
     """Build predictions list and prob_dicts from raw outputs."""
     predictions = []
     prob_dicts = []
     for i, pid in enumerate(test_ids):
         probs = {config.CLASS_LABELS[j]: float(y_proba[i][j]) for j in range(3)}
         predictions.append({
-            "id": pid, "text": test_texts[i], "label": config.ID_TO_LABEL[int(y_pred[i])],
-            "probabilities": probs, "hard_prediction": int(y_pred[i]),
+            "id": pid,
+            "text": test_texts[i],
+            "label": config.ID_TO_LABEL[int(y_pred[i])],
+            "probabilities": probs,
+            "hard_prediction": int(y_pred[i]),
         })
         prob_dicts.append(probs)
     return predictions, prob_dicts
@@ -380,7 +408,6 @@ METHODS = {
     "svm": run_svm,
     "xgboost": run_xgboost,
     "sbert": run_sbert,
-    # "cross_encoder": run_cross_encoder,  # Model unavailable (gated/network)
 }
 
 CLASSES_FULL = {

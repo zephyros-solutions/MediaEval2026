@@ -206,10 +206,13 @@ def _run_transformer_pipeline(device_arg=None, save_model=False):
     df = config.load_training_data()
     tokenizer = AutoTokenizer.from_pretrained(TRANSFORMER_MODEL_NAME)
 
+    # On macOS with MPS (Apple Silicon), device_map="auto" can fail due to
+    # limited PyTorch MPS backend support for some transformer operations.
+    # Always load model on CPU and move to device explicitly.
     try:
-        model = AutoModel.from_pretrained(TRANSFORMER_MODEL_NAME, device_map="auto")
+        model = AutoModel.from_pretrained(TRANSFORMER_MODEL_NAME).to(device)
     except Exception as e:
-        print(f"  device_map='auto' failed ({e}), falling back to CPU...")
+        print(f"  Model loading failed ({e}), falling back to CPU...")
         model = AutoModel.from_pretrained(TRANSFORMER_MODEL_NAME).to("cpu")
         device = torch.device("cpu")
         device_name = "CPU (fallback)"

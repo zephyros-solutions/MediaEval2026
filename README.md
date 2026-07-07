@@ -2,7 +2,7 @@
 
 **Scientific inquiry** into detecting implicit arguments (premises and conclusions) in tweets and generating missing propositions. Systematic experimentation with multiple approaches.
 
-**Status**: Classification pipeline complete | Submission files generated | **Last Updated**: May 30, 2026
+**Status**: Architecture refactored with unified CV engine | Submission files generated | **Last Updated**: Jun 11, 2026
 
 ---
 
@@ -76,8 +76,10 @@ cd /path/to/project
 ### Key Files
 
 - **`config.py`** — Root config: single source of truth for data paths, labels, splits, hyperparameters
-- **`run_methods.py`** — Run all classifiers and compare results
+- **`core/evaluator.py`** — Unified CV/evaluation engine with dict-based model iteration
+- **`core/pipeline.py`** — Model registry and orchestrators (run_standalone, run_ensemble)
 - **`submit.py`** — Train on full data, generate test submissions, or run all methods and compare
+- **`task1_classification/new_classifiers.py`** — SVM, XGBoost, SBERT (uses unified CV engine)
 - **`evaluation/evaluate.py`** — Unified evaluation: Task 1 (F1, cross-entropy) + Task 2 (lexical F1, coverage)
 
 ### Dependencies
@@ -107,9 +109,16 @@ python -c "from core.ollama_integration import OllamaClient; OllamaClient().test
 ### Compare All Classification Methods
 
 ```bash
-python run_methods.py                          # Run all methods
-python run_methods.py --run-only transformer   # Single method
-python run_methods.py --skip ollama_zero       # Skip unavailable methods
+# Run standalone models with 5-fold CV on 80% training set
+python run_methods.py
+
+# Using the unified pipeline
+python -c "from core.pipeline import run_standalone; results = run_standalone()"
+
+# Single method
+python task1_classification/task1_classifier_tfidf.py
+python task1_classification/transformer/transformer.py
+python task1_classification/new_classifiers.py --method svm
 ```
 
 ### Run Everything + Compare + Submit
@@ -129,19 +138,46 @@ This calls `submit.run_all_and_submit()` which:
 ### Individual Scripts
 
 ```bash
-# Classification
+# Classification (all use unified CV engine from core/evaluator.py)
 python task1_classification/task1_classifier_tfidf.py        # TF-IDF + Random Forest
 python task1_classification/transformer/transformer.py       # DistilBERT features
-python task1_classification/task1_ollama_classifier.py       # Ollama zero-shot
-python task1_classification/task1_ollama_fewshot.py          # Ollama few-shot
-python task1_classification/task1_ensemble.py --method all   # Run all 6 ensemble strategies
 python task1_classification/new_classifiers.py               # SVM, XGBoost, SBERT
-
-# Generation
-python task2_generation/task2_generator.py                      # Template-based
-python task2_generation/task2_ollama_generator.py               # Ollama (gemma4 → qwen3.6 → mistral)
-python task2_generation/task2_generator_enhanced.py --both      # T5 train + generate
 ```
+
+**Note**: All classification methods now use the shared `core/evaluator.py` for consistent CV/evaluation.
+Each method has a single `_run_pipeline()` function that handles both standalone (80/20 with CV) and
+ensemble (train on ALL data) modes.
+
+### Apple Silicon (M1/M2/M3) Compatibility Notes
+
+**XGBoost Segmentation Fault:**
+On macOS ARM64, running XGBoost may cause a segmentation fault when training TF-IDF + XGBoost models.
+This is caused by BLAS library conflicts in the XGBoost compiled binaries on Apple Silicon.
+
+**Workarounds:**
+1. Disable XGBoost by removing "tfidf_xgb" from `core/pipeline.py` MODELS dict
+2. Install XGBoost via conda-forge: `conda install -c conda-forge xgboost`
+3. Use XGBoost 2.x instead of 3.x: `pip install 'xgboost<3.0'`
+
+See `docs/AGENT_CONTEXT.md` for full technical details.
+
+### Ensemble Methods
+
+Two approaches are available:
+
+**1. Simplified ensemble weights (default in submit.py)**
+```bash
+python submit.py --task1  # Uses compute_ensemble_weights() from 5-fold CV F1 scores
+```
+
+**2. Nested Cross-Validation (methodologically correct)**
+```python
+from core.ensemble_nested_cv import nested_cv_ensemble
+results = nested_cv_ensemble()
+# This implements the workflow in AGENT_CONTEXT.md lines 252-298
+# Outer loop: 5-fold CV, Inner loop: train base models with their own CV
+```
+Note: Nested CV is computationally intensive. For faster iteration, use the simplified approach.
 
 ---
 
@@ -364,9 +400,10 @@ MediaEval/2026/
 ├── requirements.txt
 ├── core/                              ← Shared utilities
 │   ├── ollama_integration.py         # Ollama client (auto-detect URL)
+│   ├── evaluator.py                  # Unified CV/evaluation engine
+│   ├── pipeline.py                   # Model registry and orchestrators
 │   ├── common_utils.py_not_used      # Abandoned: unused
-│   ├── domain_feature_engineering.py_not_used  # Abandoned: unused
-│   └── explore_data.py_not_used      # Abandoned: unused
+│   └── domain_feature_engineering.py_not_used  # Abandoned: unused
 ├── task1_classification/              ← Classification experiments
 │   ├── task1_classifier_tfidf.py     # TF-IDF + RF
 │   ├── task1_ollama_classifier.py    # Ollama zero-shot
@@ -437,11 +474,54 @@ python task1_classification/transformer/transformer.py --device cpu
 
 ### Adding New Methods
 
+**Preferred approach (unified pipeline)**:
+1. Define feature extractor and classifier factory in `core/pipeline.py`
+2. The unified evaluation engine handles CV, metrics, and both standalone/ensemble modes
+
+**Alternative (manual)**:
 1. Create file in `task1_classification/`
 2. Import from root `config.py`
 3. Output unified format: `{id, text, label, probabilities, hard_prediction}`
-4. Add to `TASK1_METHODS` in `run_methods.py` and `METHODS` in `task1_ensemble.py`
-5. See [AGENT_CONTEXT.md](AGENT_CONTEXT.md) for full extension guide
+4. See [AGENT_CONTEXT.md](AGENT_CONTEXT.md) for full extension guide
+
+
+## Target Architecture
+
+This section describes the ideal state of the codebase as defined in
+[AGENT_CONTEXT.md](docs/AGENT_CONTEXT.md#target-architecture-ideals-for-future-development).
+
+### Design Goals
+
+The following should be achieved for optimal maintainability and model comparison:
+
+| Goal | Current State | Target State |
+|------|---------------|--------------|
+| Single data loading path | Partial (`config.load_data()`) | All classifiers use same function |
+| One CV/evaluation engine | `core/evaluator.py` exists | Fully utilized by all models |
+| Dict-based model iteration | `pipeline.py` registry | Add more models via config dict |
+| No duplicate training loops | Partial (some duplication) | Single `_run_pipeline()` per module |
+
+### Current Model Registry (core/pipeline.py)
+
+The following models are now implemented and available:
+
+| Model | Classifier | Description |
+|-------|------------|-------------|
+| tfidf_lr | LogisticRegression | Statistical baseline with balanced class weights |
+| tfidf_svm | LinearSVC | Linear SVM on TF-IDF features |
+| tfidf_ridge | RidgeClassifier | Ridge regression for high-dimensional sparse data |
+| tfidf_knn | KNeighborsClassifier | Instance-based learning comparison |
+| tfidf_complement_nb | ComplementNB | Optimized for imbalanced text classification |
+| tfidf_rf | RandomForestClassifier | Tree-based baseline method |
+| tfidf_xgb | XGBoost (optional) | Gradient boosting (requires xgboost package) |
+
+All models use TF-IDF feature extraction and are trained via the unified CV engine.
+
+### Future Improvements
+
+- **Nested CV**: Implement full nested cross-validation for ensemble optimization
+- **Cross-encoder**: Integrate reranker-MiniLM when model availability improves
+- **Automatic model selection**: Add logic to rank models and compute ensemble weights from validation metrics
 
 ### Known Limitations
 
@@ -469,5 +549,5 @@ All submission files are in `outputs/` and verified:
 ---
 
 **Dataset Source**: MediaEval 2026 Shared Task - Enthymeme Detection  
-**Last Updated**: May 30, 2026  
+**Last Updated**: Jun 11, 2026  
 **Status**: All submission files ready in `outputs/`

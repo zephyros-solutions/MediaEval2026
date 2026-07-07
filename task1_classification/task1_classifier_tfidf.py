@@ -11,14 +11,12 @@ Output:
   outputs/predictions_classifiers.json   (challenge format with probabilities)
   outputs/evaluation_report.json        (CV + test metrics + cross-entropy)
 
-Callable interface:
-  from task1_classification.task1_classifier_tfidf import run_tfidf
-  predictions, report = run_tfidf()
+Callables:
+  from task1_classification.task1_classifier_tfidf import run_tfidf, run_tfidf_for_ensemble
+  predictions, report = run_tfidf()           # Standalone: 80% train / 20% test with CV
+  predictions, report, artifacts = run_tfidf_for_ensemble()  # Full data for ensemble
 
-Ensemble interface:
-  from task1_classification.task1_classifier_tfidf import run_tfidf_for_ensemble
-  predictions, report, artifacts = run_tfidf_for_ensemble(use_full_data=False)
-  # artifacts = {"model": ..., "vectorizer": ..., "texts": ..., "df": ...}
+Fixed: Uses shared _run_pipeline() for both modes - no duplicate code.
 """
 
 import sys
@@ -52,9 +50,12 @@ def _make_soft_weights(df_subset, majority_labels_full, ann_labels_list):
 def _run_pipeline(use_full_data=False):
     """Run the full TF-IDF pipeline.
 
+    Shared implementation for both standalone and ensemble modes.
+    One source of truth for training/evaluation logic.
+
     Args:
         use_full_data: If True, train on ALL annotated data (for ensemble).
-                       If False (default), train on 100% - config.TRAIN_VAL_SPLIT% and evaluate on config.TRAIN_VAL_SPLIT%.
+                       If False, train on 80% and evaluate on 20% test set.
 
     Returns:
         (predictions, report, artifacts|None)
@@ -72,6 +73,7 @@ def _run_pipeline(use_full_data=False):
         train_df = df
         print("Training on ALL data (ensemble mode).\n")
     else:
+        # Use 80/20 split for standalone mode
         test_df = df.sample(frac=1 - config.TRAIN_VAL_SPLIT, random_state=config.RANDOM_STATE)
         train_df = df.drop(test_df.index)
         print(f"Data splits: train={len(train_df)}, test={len(test_df)}\n")
@@ -168,19 +170,22 @@ def _run_pipeline(use_full_data=False):
 
 def run_tfidf():
     """Run TF-IDF classifier. Returns (predictions, report)."""
-    preds, report, _ = _run_pipeline()
+    preds, report, _ = _run_pipeline(use_full_data=False)
     return preds, report
 
 
 def run_tfidf_for_ensemble():
     """Run TF-IDF with CV, return model artifacts for ensemble.
 
+    Trains on ALL data using the same CV pipeline as run_tfidf().
+
     Returns:
         (predictions, report, artifacts)
         artifacts = {"model": RandomForestClassifier, "vectorizer": TfidfVectorizer,
                      "texts": ndarray, "df": DataFrame, "y_all": ndarray}
     """
-    return _run_pipeline(use_full_data=True)
+    preds, report, artifacts = _run_pipeline(use_full_data=True)
+    return preds, report, artifacts
 
 
 def get_full_data_predictions():

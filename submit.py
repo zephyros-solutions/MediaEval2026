@@ -152,12 +152,15 @@ def compute_ensemble_weights():
     cv_scores["tfidf_svm"] = f1
     print(f"    F1(3-class)={f1:.4f}")
 
-    # XGBoost
+    # XGBoost - skip on macOS where it's stubbed
     print("  4/5 TF-IDF + XGBoost...")
     preds, rep = run_xgboost()
-    f1 = rep.get("test_metrics", {}).get("f1_macro_3class")
-    cv_scores["tfidf_xgb"] = f1
-    print(f"    F1(3-class)={f1:.4f}")
+    if preds is not None:
+        f1 = rep.get("test_metrics", {}).get("f1_macro_3class")
+        cv_scores["tfidf_xgb"] = f1
+        print(f"    F1(3-class)={f1:.4f}")
+    else:
+        print("    SKIPPED (disabled on this platform)")
 
     # SBERT
     print("  5/5 SBERT + LR...")
@@ -296,14 +299,23 @@ def compare_standalone_vs_ensemble():
 
 def _get_available_classifiers():
     """Check which classifiers are available and return their names."""
+    import platform
+
     classifiers = ["tfidf_rf", "transformer", "tfidf_svm"]
+
+    # Check if XGBoost is installed AND not on macOS ARM64 (where it segfaults)
     try:
         import xgboost
-        classifiers.append("tfidf_xgb")
+        if "arm" in platform.machine() or platform.system() == "Darwin":
+            print("  [INFO] XGBoost skipped on macOS (segfault risk)")
+            # Return None to mark XGB as unavailable
+            return classifiers + ["sbert_lr"], False
+        else:
+            classifiers.append("tfidf_xgb")
     except ImportError:
         pass
-    classifiers.append("sbert_lr")
-    return classifiers
+
+    return classifiers + ["sbert_lr"], True
 
 
 def submit_task1(weights=None):
@@ -316,6 +328,11 @@ def submit_task1(weights=None):
     Returns:
         (test_submission, full_submission)
     """
+    # Import classifier functions needed for training on full data
+    from task1_classification.task1_classifier_tfidf import run_tfidf_for_ensemble
+    from task1_classification.transformer.transformer import run_transformer_for_ensemble
+    from task1_classification.new_classifiers import run_svm_for_ensemble, run_xgboost_for_ensemble, run_sbert_for_ensemble
+
     print("=" * 60)
     print("TASK 1: TRAINING ALL CLASSIFIERS ON FULL DATA")
     print("=" * 60)
@@ -329,7 +346,7 @@ def submit_task1(weights=None):
 
     # ---- Step 2: Train all classifiers on full data ----
     print("\nTraining all classifiers on ALL 1333 instances...")
-    classifiers = _get_available_classifiers()
+    classifiers, xgb_available = _get_available_classifiers()
     available = {}
     all_f1 = {}
 
@@ -349,6 +366,9 @@ def submit_task1(weights=None):
                 f1 = rep.get("cv_scores", {}).get("macro_f1_3class")
                 available[clf_name] = ("svm", art)
             elif clf_name == "tfidf_xgb":
+                if not xgb_available:
+                    print("   [XGBoost] disabled on this platform, skipping")
+                    continue
                 preds, rep, art = run_xgboost_for_ensemble()
                 if preds is None:
                     print("   [XGBoost] unavailable, skipping")
@@ -666,8 +686,8 @@ def main():
     parser.add_argument("--run-all", action="store_true", help="Run all methods, compare, pick best, submit")
     args, _ = parser.parse_known_args()
 
-    do_task1 = args.task1 or not args.task2 and not args.t5 and not args.ollama and not args.all and not args.run_all
-    do_task2 = args.task2 or args.t5 or args.ollama or args.all
+    do_task1 = args.task1 
+    do_task2 = args.task2 or args.t5 or args.ollama
     if args.all:
         do_task1, do_task2 = True, True
 
